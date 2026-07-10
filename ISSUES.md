@@ -100,12 +100,17 @@ Manual Start-skip tears down 24-bit MDEC; for a few frames VRAM is still
 screenshot). Fix: blank present while Start is held in depth24, and ~6–10
 frames after leaving depth24.
 
+#### SPU reverb (2026-07-10) — landed for BIOS logo / ambience
+
+DuckStation/psx-spx reverb unit: FIR halfband 44.1↔22.05, IIR/comb/APF
+network in SPU RAM work area (mBASE), EON voice sends, CD reverb bit,
+vLOUT/vROUT. Expect richer PlayStation logo chord and hall tails.
+
 #### Still open
 
-- Retest FMV skip: no rainbow flash.
+- Retest BIOS logo reverb quality vs DuckStation.
+- Noise / PMON / volume sweeps / SPU IRQ still missing.
 - MDEC whole-frame decode remains architectural.
-- Do **not** raise `disc_speed` for FMV (XA is forced 1× by design).
-- Optional later: SPU reverb (BIOS logo / ambience).
 
 ### #1 Launcher fails to link on MinGW
 `PSX_LAUNCHER=ON` → undefined modern GL symbols (`glCreateShader`, …) from

@@ -247,6 +247,190 @@ static inline int32_t abs32(int32_t v) {
     return v < 0 ? -v : v;
 }
 
+/* DuckStation / Mednafen ApplyVolume: (sample * vol) >> 15 */
+static inline int32_t apply_volume15(int32_t sample, int16_t volume) {
+    return (sample * (int32_t)volume) >> 15;
+}
+
+/* ---- SPU reverb (DuckStation ProcessReverb, scalar; psx-spx FIR) --------
+ * Work area lives in SPU RAM from mBASE. Processed at effective 22050 Hz
+ * (every other 44.1 kHz sample) with 20-tap half-band FIR up/down. */
+#define SPU_REVERB_REGS 32
+static uint16_t s_rev[SPU_REVERB_REGS];
+static int16_t  s_vLOUT, s_vROUT;
+static uint16_t s_mBASE;
+static uint32_t s_reverb_base;     /* word address (halfword index / 4?) */
+static uint32_t s_reverb_current;  /* advances each 22050 Hz tick */
+static int16_t  s_rev_down[2][128];
+static int16_t  s_rev_up[2][64];
+static int      s_rev_pos;         /* 0..63 */
+static uint32_t s_eon_latch;       /* 24-bit voice reverb enable */
+
+/* rev[] layout matches DuckStation ReverbRegisters::rev */
+#define RV_FB_SRC_A      s_rev[0]
+#define RV_FB_SRC_B      s_rev[1]
+#define RV_IIR_ALPHA     ((int16_t)s_rev[2])
+#define RV_ACC_COEF_A    ((int16_t)s_rev[3])
+#define RV_ACC_COEF_B    ((int16_t)s_rev[4])
+#define RV_ACC_COEF_C    ((int16_t)s_rev[5])
+#define RV_ACC_COEF_D    ((int16_t)s_rev[6])
+#define RV_IIR_COEF      ((int16_t)s_rev[7])
+#define RV_FB_ALPHA      ((int16_t)s_rev[8])
+#define RV_FB_X          ((int16_t)s_rev[9])
+#define RV_IIR_DEST_A(c) s_rev[10 + (c)]
+#define RV_ACC_SRC_A(c)  s_rev[12 + (c)]
+#define RV_ACC_SRC_B(c)  s_rev[14 + (c)]
+#define RV_IIR_SRC_A(c)  s_rev[16 + (c)]
+#define RV_IIR_DEST_B(c) s_rev[18 + (c)]
+#define RV_ACC_SRC_C(c)  s_rev[20 + (c)]
+#define RV_ACC_SRC_D(c)  s_rev[22 + (c)]
+#define RV_IIR_SRC_B(c)  s_rev[24 + (c)]
+#define RV_MIX_DEST_A(c) s_rev[26 + (c)]
+#define RV_MIX_DEST_B(c) s_rev[28 + (c)]
+#define RV_IN_COEF(c)    ((int16_t)s_rev[30 + (c)])
+
+static void reverb_reset(void) {
+    memset(s_rev, 0, sizeof(s_rev));
+    s_vLOUT = s_vROUT = 0;
+    s_mBASE = 0;
+    s_reverb_base = s_reverb_current = 0;
+    memset(s_rev_down, 0, sizeof(s_rev_down));
+    memset(s_rev_up, 0, sizeof(s_rev_up));
+    s_rev_pos = 0;
+    s_eon_latch = 0;
+}
+
+/* DuckStation: address is in "reverb words"; RAM is byte-addressed. */
+static uint32_t reverb_mem_addr(uint32_t address) {
+    const uint32_t MASK = (SPU_RAM_SIZE - 1u) / 2u;
+    uint32_t offset = s_reverb_current + (address & MASK);
+    /* if offset wraps past end of RAM/2, add base (sign-extend trick) */
+    offset += s_reverb_base & (uint32_t)((int32_t)(offset << 13) >> 31);
+    return (offset & MASK) * 2u;
+}
+
+static int16_t reverb_read(uint32_t address, int32_t offset) {
+    uint32_t real = reverb_mem_addr((address << 2) + (uint32_t)offset);
+    return (int16_t)(spu_ram[real] | ((uint16_t)spu_ram[real + 1] << 8));
+}
+
+static void reverb_write(uint32_t address, int16_t data) {
+    uint32_t real = reverb_mem_addr(address << 2);
+    spu_ram[real]     = (uint8_t)((uint16_t)data & 0xFF);
+    spu_ram[real + 1] = (uint8_t)(((uint16_t)data >> 8) & 0xFF);
+}
+
+static int32_t reverb_iiasm(int16_t insamp) {
+    if (RV_IIR_ALPHA == (int16_t)-32768)
+        return (insamp == (int16_t)-32768) ? 0 : (insamp * -65536);
+    return insamp * (32768 - RV_IIR_ALPHA);
+}
+
+static int32_t reverb_neg(int32_t samp) {
+    return (samp == -32768) ? 0x7FFF : -samp;
+}
+
+/* FIR coeffs (zeros removed from 39-tap halfband) — psx-spx / DuckStation. */
+static const int32_t s_resample_coeff[20] = {
+    -0x0001, 0x0002,  -0x000A, 0x0023,  -0x0067, 0x010A,  -0x0268, 0x0534,
+    -0x0B90, 0x2806,  0x2806,  -0x0B90, 0x0534,  -0x0268, 0x010A,  -0x0067,
+     0x0023, -0x000A, 0x0002,  -0x0001
+};
+
+static void process_reverb(int32_t left_in, int32_t right_in,
+                           int32_t *left_out, int32_t *right_out,
+                           int rev_master) {
+    int16_t lin = clamp16(left_in);
+    int16_t rin = clamp16(right_in);
+    int pos = s_rev_pos;
+
+    s_rev_down[0][pos | 0x00] = s_rev_down[0][pos | 0x40] = lin;
+    s_rev_down[1][pos | 0x00] = s_rev_down[1][pos | 0x40] = rin;
+
+    int32_t out[2];
+
+    if (pos & 1) {
+        int32_t downsampled[2];
+        for (int ch = 0; ch < 2; ch++) {
+            /* 39-tap halfband at 44.1 kHz; odd taps are 0 so only even indices
+             * (compact table) + centre 0x4000 at src[19]. */
+            const int16_t *src = &s_rev_down[ch][(pos - 38) & 0x3F];
+            int32_t acc = 0;
+            for (int k = 0; k < 20; k++)
+                acc += s_resample_coeff[k] * (int32_t)src[k * 2];
+            acc += 0x4000 * (int32_t)src[19];
+            downsampled[ch] = clamp16(acc >> 15);
+        }
+
+        for (int ch = 0; ch < 2; ch++) {
+            if (rev_master) {
+                int32_t IIR_INPUT_A = clamp16(
+                    (((reverb_read(RV_IIR_SRC_A(ch ^ 0), 0) * RV_IIR_COEF) >> 14) +
+                     ((downsampled[ch] * RV_IN_COEF(ch)) >> 14)) >> 1);
+                int32_t IIR_INPUT_B = clamp16(
+                    (((reverb_read(RV_IIR_SRC_B(ch ^ 1), 0) * RV_IIR_COEF) >> 14) +
+                     ((downsampled[ch] * RV_IN_COEF(ch)) >> 14)) >> 1);
+
+                int32_t IIR_A = clamp16(
+                    (((IIR_INPUT_A * RV_IIR_ALPHA) >> 14) +
+                     (reverb_iiasm(reverb_read(RV_IIR_DEST_A(ch), -1)) >> 14)) >> 1);
+                int32_t IIR_B = clamp16(
+                    (((IIR_INPUT_B * RV_IIR_ALPHA) >> 14) +
+                     (reverb_iiasm(reverb_read(RV_IIR_DEST_B(ch), -1)) >> 14)) >> 1);
+
+                reverb_write(RV_IIR_DEST_A(ch), (int16_t)IIR_A);
+                reverb_write(RV_IIR_DEST_B(ch), (int16_t)IIR_B);
+            }
+
+            int32_t ACC =
+                ((reverb_read(RV_ACC_SRC_A(ch), 0) * RV_ACC_COEF_A) >> 14) +
+                ((reverb_read(RV_ACC_SRC_B(ch), 0) * RV_ACC_COEF_B) >> 14) +
+                ((reverb_read(RV_ACC_SRC_C(ch), 0) * RV_ACC_COEF_C) >> 14) +
+                ((reverb_read(RV_ACC_SRC_D(ch), 0) * RV_ACC_COEF_D) >> 14);
+
+            int32_t FB_A = reverb_read((uint16_t)(RV_MIX_DEST_A(ch) - RV_FB_SRC_A), 0);
+            int32_t FB_B = reverb_read((uint16_t)(RV_MIX_DEST_B(ch) - RV_FB_SRC_B), 0);
+            int32_t MDA = clamp16((ACC + ((FB_A * reverb_neg(RV_FB_ALPHA)) >> 14)) >> 1);
+            int32_t MDB = clamp16(
+                FB_A + ((((MDA * RV_FB_ALPHA) >> 14) +
+                         ((FB_B * reverb_neg(RV_FB_X)) >> 14)) >> 1));
+
+            int16_t samp22050 = clamp16(FB_B + ((MDB * RV_FB_X) >> 15));
+            int up_i = (pos >> 1);
+            s_rev_up[ch][up_i | 0x20] = s_rev_up[ch][up_i] = samp22050;
+
+            if (rev_master) {
+                reverb_write(RV_MIX_DEST_A(ch), (int16_t)MDA);
+                reverb_write(RV_MIX_DEST_B(ch), (int16_t)MDB);
+            }
+        }
+
+        s_reverb_current = (s_reverb_current + 1u) & 0x3FFFFu;
+        if (s_reverb_current == 0)
+            s_reverb_current = s_reverb_base;
+
+        for (int ch = 0; ch < 2; ch++) {
+            const int16_t *src = &s_rev_up[ch][(((pos >> 1) - 19) & 0x1F)];
+            int32_t acc = 0;
+            /* Upsample FIR: coeffs on even taps of halfband; compact form
+             * multiplies consecutive samples in the 32-slot ring. */
+            for (int k = 0; k < 20; k++)
+                acc += s_resample_coeff[k] * (int32_t)src[k];
+            out[ch] = acc >> 14;
+            if (out[ch] > 32767) out[ch] = 32767;
+            if (out[ch] < -32768) out[ch] = -32768;
+        }
+    } else {
+        int idx = (((pos >> 1) - 19) & 0x1F) + 9;
+        out[0] = s_rev_up[0][idx];
+        out[1] = s_rev_up[1][idx];
+    }
+
+    s_rev_pos = (pos + 1) & 0x3F;
+    *left_out  = apply_volume15(out[0], s_vLOUT);
+    *right_out = apply_volume15(out[1], s_vROUT);
+}
+
 static inline uint32_t reg_index(uint32_t addr) {
     return (addr - 0x1F801C00u) >> 1;
 }
@@ -546,6 +730,7 @@ void spu_init(void) {
     s_last_out_l = s_last_out_r = 0;
     s_out_overflow_frames = s_out_underflow_frames = 0;
     s_last_cd_l = s_last_cd_r = 0;
+    reverb_reset();
     spu_shadow_reset();
 }
 
@@ -553,6 +738,7 @@ void spu_init(void) {
 static void spu_mix_one_sample(int16_t* out_l, int16_t* out_r) {
     uint16_t ctrl = spu_regs[reg_index(0x1F801DAAu)];
     int enabled = (ctrl & 0x8000u) != 0;
+    int mute_n  = (ctrl & 0x4000u) != 0; /* 0 = muted */
     int16_t main_l = direct_volume(spu_regs[reg_index(0x1F801D80u)]);
     int16_t main_r = direct_volume(spu_regs[reg_index(0x1F801D82u)]);
     int16_t cd_vol_l = cd_input_volume(spu_regs[reg_index(0x1F801DB0u)]);
@@ -567,6 +753,9 @@ static void spu_mix_one_sample(int16_t* out_l, int16_t* out_r) {
 
     int32_t mix_l = 0;
     int32_t mix_r = 0;
+    int32_t rev_in_l = 0;
+    int32_t rev_in_r = 0;
+    uint32_t eon = s_eon_latch;
 
     if (enabled) {
         for (int v = 0; v < SPU_VOICE_COUNT; v++) {
@@ -579,8 +768,14 @@ static void spu_mix_one_sample(int16_t* out_l, int16_t* out_r) {
                 t->vol_r = vr;
             }
             if (!s) continue;
-            mix_l += ((int32_t)s * vl) >> 14;
-            mix_r += ((int32_t)s * vr) >> 14;
+            int32_t left  = ((int32_t)s * vl) >> 14;
+            int32_t right = ((int32_t)s * vr) >> 14;
+            mix_l += left;
+            mix_r += right;
+            if (eon & (1u << v)) {
+                rev_in_l += left;
+                rev_in_r += right;
+            }
         }
         if (ctrl & 0x0001u) {
             int16_t cd_l = 0;
@@ -588,16 +783,36 @@ static void spu_mix_one_sample(int16_t* out_l, int16_t* out_r) {
             if (cd_audio_pop(&cd_l, &cd_r)) {
                 s_last_cd_l = cd_l;
                 s_last_cd_r = cd_r;
-                mix_l += ((int32_t)cd_l * cd_vol_l) >> 15;
-                mix_r += ((int32_t)cd_r * cd_vol_r) >> 15;
             } else if (cd_push_frames != 0) {
                 cd_underflow_frames++;
-                mix_l += ((int32_t)s_last_cd_l * cd_vol_l) >> 15;
-                mix_r += ((int32_t)s_last_cd_r * cd_vol_r) >> 15;
+                cd_l = s_last_cd_l;
+                cd_r = s_last_cd_r;
+            } else {
+                cd_l = cd_r = 0;
+            }
+            int32_t cdl = ((int32_t)cd_l * cd_vol_l) >> 15;
+            int32_t cdr = ((int32_t)cd_r * cd_vol_r) >> 15;
+            mix_l += cdl;
+            mix_r += cdr;
+            /* SPUCNT bit2: CD audio to reverb */
+            if (ctrl & 0x0004u) {
+                rev_in_l += cdl;
+                rev_in_r += cdr;
             }
         }
-        mix_l = (mix_l * main_l) >> 14;
-        mix_r = (mix_r * main_r) >> 14;
+        if (!mute_n) {
+            mix_l = mix_r = 0;
+            rev_in_l = rev_in_r = 0;
+        }
+
+        int32_t rev_out_l = 0, rev_out_r = 0;
+        process_reverb(rev_in_l, rev_in_r, &rev_out_l, &rev_out_r,
+                       (ctrl & 0x0080u) != 0);
+        mix_l += rev_out_l;
+        mix_r += rev_out_r;
+
+        mix_l = (clamp16(mix_l) * main_l) >> 14;
+        mix_r = (clamp16(mix_r) * main_r) >> 14;
     }
 
     int16_t ol = clamp16(mix_l);
@@ -779,6 +994,30 @@ void spu_write(uint32_t addr, uint32_t value) {
                 key_off((uint32_t)(uint16_t)value << 16);
             }
 
+            /* EON — per-voice reverb enable (24 bits). */
+            if (addr == 0x1F801D98u) {
+                s_eon_latch = (s_eon_latch & 0xFFFF0000u) | (uint32_t)(uint16_t)value;
+            }
+            if (addr == 0x1F801D9Au) {
+                s_eon_latch = (s_eon_latch & 0x0000FFFFu) | ((uint32_t)(uint16_t)value << 16);
+            }
+
+            /* Reverb output volumes + work-area base. */
+            if (addr == 0x1F801D84u) s_vLOUT = (int16_t)(uint16_t)value;
+            if (addr == 0x1F801D86u) s_vROUT = (int16_t)(uint16_t)value;
+            if (addr == 0x1F801DA2u) {
+                s_mBASE = (uint16_t)value;
+                s_reverb_base = ((uint32_t)value << 2) & 0x3FFFFu;
+                s_reverb_current = s_reverb_base;
+            }
+
+            /* Reverb configuration block 1F801DC0..1F801DFF (32 halfwords). */
+            if (addr >= 0x1F801DC0u && addr <= 0x1F801DFEu) {
+                uint32_t ri = (addr - 0x1F801DC0u) / 2u;
+                if (ri < SPU_REVERB_REGS)
+                    s_rev[ri] = (uint16_t)value;
+            }
+
             if (addr == 0x1F801DA6u) {
                 transfer_addr = ((uint32_t)(uint16_t)value) << 3;
                 if (transfer_addr >= SPU_RAM_SIZE) transfer_addr = 0;
@@ -845,8 +1084,7 @@ void spu_get_global_state(SpuGlobalState* out) {
                 ((uint32_t)spu_regs[reg_index(0x1F801D92u)] << 16);
     out->non  = (uint32_t)spu_regs[reg_index(0x1F801D94u)] |
                 ((uint32_t)spu_regs[reg_index(0x1F801D96u)] << 16);
-    out->eon  = (uint32_t)spu_regs[reg_index(0x1F801D98u)] |
-                ((uint32_t)spu_regs[reg_index(0x1F801D9Au)] << 16);
+    out->eon  = s_eon_latch;
     out->endx = endx_latch & 0xFFFFFFu;
     uint32_t am = 0;
     for (int i = 0; i < SPU_VOICE_COUNT; i++)
