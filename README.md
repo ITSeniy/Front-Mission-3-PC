@@ -9,7 +9,9 @@ It does **not** ship the disc image, BIOS, or generated game C.
 
 ## Status
 
-**Phase 1 complete** — first game binary boots BIOS + disc. Next: Phase 2 boot path.
+**Working snapshot (2026-07-10)** — boots to gameplay with polished FMV/audio
+path. Pre-playthrough SPU stack landed; formal Playthrough A in progress.
+Details: `docs/WORKING_STATE.md`.
 
 | Milestone | State |
 |---|---|
@@ -17,8 +19,11 @@ It does **not** ship the disc image, BIOS, or generated game C.
 | `game.toml` + JAL seeds (3839) | Done |
 | Game regen (4542 funcs) | Done |
 | `Front_Mission_3_Recompiled.exe` | Done (~31 MB) |
-| Boot smoke (BIOS LLE + disc SLUS-01011) | Done (45s soak) |
-| Visual BIOS → title bring-up | Phase 2 |
+| Boot smoke (BIOS LLE + disc SLUS-01011) | Done |
+| FMV present + guest-clock SPU | Done |
+| SPU reverb / sweeps / noise / PMON | Done |
+| SPU IRQ9 + capture buffers | Done |
+| Playthrough A (logo → FMV → menu → gameplay) | In progress |
 
 ### Run
 
@@ -37,8 +42,8 @@ powershell -File tools\compile_overlays.ps1
 # then restart the game — loads build/cache
 ```
 
-Known rough edges: dry BIOS logo audio (SPU reverb not in framework yet),
-mild FMV hitch until overlay cache is warm — see `ISSUES.md` #5 / #6.
+Known rough edges: residual logo/FMV polish vs DuckStation — see `ISSUES.md`
+#5 / #6.
 
 ## Requirements
 

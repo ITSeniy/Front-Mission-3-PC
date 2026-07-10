@@ -1,5 +1,7 @@
 # Front Mission 3 Recomp — issues
 
+Working snapshot: `docs/WORKING_STATE.md` (2026-07-10, post-SPU IRQ/capture).
+
 ## Open
 
 ### #5 Strange / dry sound on PlayStation BIOS logo
