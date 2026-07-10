@@ -1,0 +1,80 @@
+# Build outputs
+/build/
+/build-*/
+/out/
+/.happypath/
+
+# Recompiler output (derivative of copyrighted game code, regenerate locally)
+/generated/
+
+# Framework generated BIOS C (local)
+/psxrecomp/generated/
+/psxrecomp-master/generated/
+/psxrecomp/recompiler/build/
+/psxrecomp-master/recompiler/build/
+/psxrecomp/runtime/build/
+/psxrecomp-master/runtime/build/
+
+# Release packaging artifacts
+release-stage/
+*.zip
+
+# Local PlayStation assets
+/fm3/
+/isos/
+/saves/
+*.bin
+*.BIN
+*.cue
+*.iso
+*.img
+*.sub
+*.ccd
+*.mcd
+*.mcr
+
+# Keep intentional exception for docs assets if any later
+!docs/**/*.png
+
+# Ghidra projects and local analysis databases
+*.gpr
+*.rep/
+
+# Local editor/cache files
+.vs/
+.vscode/
+*.user
+*.log
+
+# Runtime artifacts from psx-runtime launches
+psx_crash.txt
+psx_last_run_report.json
+psx_screenshot.bmp
+starvation_dump.jsonl
+overlay_captures.json
+cache/
+bios.cfg
+disc.cfg
+input.ini
+keybinds.ini
+settings.toml
+
+# Local framework dump bulk (track only hand-edited sources explicitly)
+psxrecomp-master/recompiler/build/
+psxrecomp-master/runtime/build/
+psxrecomp-master/generated/
+psxrecomp-master/bios/
+psxrecomp-master/lib/RmlUi/
+psxrecomp-master/lib/freetype/
+TombaRecomp-master/
+
+# Diagnostic dumps (root-level)
+/*.json
+/*.bmp
+/*.png
+
+# Python caches
+__pycache__/
+
+# Framework vendored clones (if re-cloned into tree)
+# Note: psxrecomp-master is kept as local framework dump for now

@@ -1,0 +1,61 @@
+# Front Mission 3 (USA, SLUS-01011)
+# Header + seeds from psxrecomp-toml; runtime defaults tuned for first boot.
+
+[game]
+name = "Front Mission 3"
+id = "SLUS-01011"
+exe = "fm3/SLUS_010.11"
+# Prefer path without spaces for CLI/tooling robustness.
+# Root cue still works if quoted. Hardlink: fm3/fm3.bin -> USA bin.
+disc = "fm3/fm3.cue"
+load_address = "0x80010000"
+entry_pc = "0x8001004C"
+# PS-X EXE t_size field (header offset 0x1C). File = 0x800 header + 0xD4800.
+text_size = "0x000D4800"
+stack_base = "0x801FFFF0"
+
+[recompiler]
+seeds = "seeds/jal_seeds.txt"
+out_dir = "generated"
+strict = true
+
+[runtime]
+debug_port = 4480
+window_title = "Front Mission 3 Recompiled"
+memcard_dir = "saves"
+disc_speed = "1x"
+# Pure LLE first — no HLE shortcuts while bringing the title up.
+bios_hle = false
+bios_hle_keep_intro = false
+fast_boot = false
+overlay_cache = true
+overlay_backend = "auto"
+# Background recompile of newly captured overlays (needs gcc on PATH).
+# Paths are absolute-ish via project root; adjust if your MSYS install differs.
+overlay_autocompile_cmd = "python psxrecomp/tools/compile_overlays.py --game-toml game.toml --recompiler psxrecomp/recompiler/build/psxrecomp-game.exe --runtime-include psxrecomp/runtime/include --gcc C:/msys64/mingw64/bin/gcc.exe --cps"
+# Enhancements after faithful boot path is solid.
+# turbo_loads speeds CD loads without changing guest 1x timing (XA/FMV stay 1x).
+turbo_loads = true
+
+[video]
+supersampling = 1
+antialiasing = true
+texture_filtering = "nearest"
+renderer = "opengl"
+aspect_ratio = "4:3"
+auto_skip_fmv = false
+
+[controller]
+default_analog = false
+deadzone = 12000
+
+[audit]
+# Code region for coverage tools (ROM offset skips 0x800 PS-X EXE header).
+[[audit.regions]]
+name = "Text"
+rom_start = "0x800"
+rom_end = "0xD5000"
+vaddr_base = "0x80010000"
+
+[audit.normalize]
+kseg_mask = "0x1FFFFFFF"
