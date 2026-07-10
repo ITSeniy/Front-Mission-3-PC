@@ -11,10 +11,8 @@
 
 ## Notes
 
-- Launcher UI (`PSX_LAUNCHER=ON`) currently fails to link on MinGW: modern GL
-  symbols in `launcher.cpp` (`glCreateShader` …) are not resolved against
-  `opengl32`. Work around: `-DPSX_LAUNCHER=OFF`. GL **game** renderer still
-  loads symbols dynamically via `SDL_GL_GetProcAddress` in `gpu_gl_renderer.c`.
+- Launcher UI: modern GL loaded via `SDL_GL_GetProcAddress` (Block C1). Use
+  `-DPSX_LAUNCHER=ON` on MinGW. Game GL renderer uses the same pattern.
 - Prefer MinGW shell PATH: `C:\msys64\mingw64\bin` first.
 - Regen BIOS: `powershell -File tools/regen_bios.ps1`
 - Regen game (Phase 1+): `powershell -File tools/regen.ps1`
@@ -31,8 +29,7 @@ cmake --build psxrecomp/recompiler/build -j
 # BIOS
 powershell -File tools/regen_bios.ps1
 
-# Runtime (BIOS-only smoke)
-cmake -S psxrecomp/runtime -B psxrecomp/runtime/build -G Ninja `
-  -DCMAKE_BUILD_TYPE=Release -DPSX_LAUNCHER=OFF
-cmake --build psxrecomp/runtime/build --target psx-runtime -j
+# Runtime (with launcher)
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPSX_LAUNCHER=ON
+cmake --build build --target psx-runtime -j
 ```

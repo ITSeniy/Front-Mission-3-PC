@@ -39,7 +39,12 @@ cd build
 4. Title / menu music + input  
 5. New Game → first gameplay  
 
+## Block C (enhancements after playable)
+
+See `docs/BLOCK_C_ENHANCEMENTS.md`: launcher MinGW (C1 done), widescreen plan
+(C2), SSAA defaults (C3), turbo docs (C4), FMV skip addresses TBD (C5).
+
 ## Known open
 
-See `ISSUES.md` #5 (logo retest vs DuckStation), #6 (mild FMV cost), launcher
-MinGW link (#1). MDEC streaming FIFO (D8) still architectural.
+See `ISSUES.md` #5 / #6. MDEC streaming FIFO (D8) still architectural.
+Widescreen + FMV skip need per-game RE.

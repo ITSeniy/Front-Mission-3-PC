@@ -33,16 +33,20 @@ overlay_backend = "auto"
 # Background recompile of newly captured overlays (needs gcc on PATH).
 # Paths are absolute-ish via project root; adjust if your MSYS install differs.
 overlay_autocompile_cmd = "python psxrecomp/tools/compile_overlays.py --game-toml game.toml --recompiler psxrecomp/recompiler/build/psxrecomp-game.exe --runtime-include psxrecomp/runtime/include --gcc C:/msys64/mingw64/bin/gcc.exe --cps"
-# Enhancements after faithful boot path is solid.
-# turbo_loads speeds CD loads without changing guest 1x timing (XA/FMV stay 1x).
+# Block C enhancements — see docs/BLOCK_C_ENHANCEMENTS.md
+# turbo_loads: wall-clock skip during sustained CD data loads; XA/FMV stay 1x.
 turbo_loads = true
 
 [video]
-supersampling = 1
+# SSAA internal scale (1=native, 2=good default). Present AA is separate.
+supersampling = 2
 antialiasing = true
+# nearest = native PS look (UI-heavy FM3). bilinear softens 2D panels.
 texture_filtering = "nearest"
 renderer = "opengl"
+# 16:9 is experimental for FM3 (lots of 2D UI) — keep 4:3 until C2 tags land.
 aspect_ratio = "4:3"
+# FMV auto-skip needs FM3 fmv_skip_* addresses (C5); manual Start skip works.
 auto_skip_fmv = false
 
 [controller]

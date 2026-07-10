@@ -129,10 +129,10 @@ Block C closed the remaining non-streaming gaps:
 - Retest music fades / percussion / stream-IRQ games vs DuckStation.
 - MDEC streaming FIFO (D8) if a title desyncs on DMA pacing.
 
-### #1 Launcher fails to link on MinGW
-`PSX_LAUNCHER=ON` → undefined modern GL symbols (`glCreateShader`, …) from
-`launcher.cpp`. Workaround: `-DPSX_LAUNCHER=OFF`. Game GL renderer is fine
-(dynamic load via `SDL_GL_GetProcAddress`).
+### #1 Launcher fails to link on MinGW → fixed (Block C1)
+Was: `PSX_LAUNCHER=ON` undefined modern GL (`glCreateShader`, …) against
+`opengl32`. Fix: load modern GL via `SDL_GL_GetProcAddress` in `launcher.cpp`
+(same pattern as `gpu_gl_renderer.c`). Rebuild with `-DPSX_LAUNCHER=ON`.
 
 ### #2 Disc path with spaces
 Unquoted CLI paths to `Front Mission 3 (USA).cue` can fail early. Prefer
