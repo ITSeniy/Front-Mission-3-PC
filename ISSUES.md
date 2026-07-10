@@ -138,6 +138,51 @@ Was: `PSX_LAUNCHER=ON` undefined modern GL (`glCreateShader`, …) against
 Unquoted CLI paths to `Front Mission 3 (USA).cue` can fail early. Prefer
 `fm3/fm3.cue` + hardlink `fm3/fm3.bin`.
 
+### #7 Crash / hard exit after training (tutorial complete)
+**Severity:** blocks first-city progress  
+**Layer:** scene transition — overlay + load + BIOS B0 (LLE)  
+**Repro:** finish in-game training / tutorial → process exits (window gone).
+
+#### Forensics (`build/psx_last_run_report.json`, build `f0f1ea9`, frame ~32287)
+
+| Field | Value |
+|---|---|
+| `reason` / `exit_origin` | `atexit` / **`unknown`** (not SDL close — hard `exit`) |
+| Guest PC at dump | `0x00000400` (GPRs look **host-corrupted** `0x00007FF6…` — dump after teardown) |
+| EPC | `0x800B8990` region (VSync/timer spin helper — likely last steady PC) |
+| `unknown_dispatch` | 0 |
+| Stack | max ~7 KB (not host stack blowup) |
+| Overlay | `0x8014D000` capture (565 KB); entry **`0x8014DADC` in seeds + executed** |
+| Call chain (recent_fn) | `0x80082714 jal 0x8014DADC` → `0x80028D0C` (a0=116,a1=0xAA01) → `0x800837D4` (a0=2845) → … → BIOS thunk `0x800B20C0` → `0xB0` → `0x5E0` → `0x1F10` |
+
+Overlay prologue at `0x8014DADC` (from capture):
+
+```text
+addiu a0, zero, 116
+jal   0x80028D0C          ; alloc / open style (a1=0xAA01)
+...
+jal   0x800837D4          ; load path (a0=2845)
+jal   0x800AC57C
+...
+```
+
+Then game hits **BIOS B0** table stubs (`0x800B20C0` family: `li t2,0xB0; jr t2; li t1,N`) under **full LLE** (`bios_hle=false`). Process dies without `psx_fatal_halt` (`fatal: null`).
+
+#### Working theory
+Post-training **mode switch** (unload training → load city/setup): overlay at `0x8014D000` runs a multi-file load, then BIOS pad/card/kernel re-init. Failure is either:
+
+1. Host crash/SEH during that window (GL / overlay DLL / BIOS LLE) → untagged `exit`, or  
+2. Guest wild jump after a failed load, with atexit snapshot too late to be trustworthy.
+
+Many CRC variants of `0014D000_*.dll` already in `build/cache` — not a “zero coverage” miss.
+
+#### Next debug steps
+1. Rebuild **RelWithDebInfo** + `PSX_DEBUG_TOOLS=ON` (TCP 4480) and re-hit training end.  
+2. Keep `psx_crash.txt` / SEH dump if generated.  
+3. After the bad session: `python psxrecomp/tools/compile_overlays.py --captures build/overlay_captures.json ...` then retry.  
+4. Optional A/B: `bios_hle=true` only as a probe (not a long-term fix).  
+5. Trace CD open for the resource keyed by **2845** / type **0xAA01**.
+
 ## Closed / mitigated
 
 ### #3 Boot path not visually validated → mitigated

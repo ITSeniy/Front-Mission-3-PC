@@ -10,7 +10,7 @@ $env:Path = "C:\msys64\mingw64\bin;C:\msys64\usr\bin;" + $env:Path
 
 $Captures = Join-Path $Root 'build/overlay_captures.json'
 if (!(Test-Path $Captures)) {
-    throw "No captures at $Captures — play the game first so overlays are recorded."
+    throw "No captures at $Captures - play the game first so overlays are recorded."
 }
 
 $Recompiler = Join-Path $Root 'psxrecomp/recompiler/build/psxrecomp-game.exe'
