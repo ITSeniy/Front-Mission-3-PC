@@ -2,7 +2,7 @@
  * spu.c - PS1 Sound Processing Unit register and direct ADPCM voice model.
  *
  * Compact hardware model: SPU registers, DMA4, 24 ADPCM voices + ADSR, CD/XA
- * input, reverb, volume sweeps, noise, PMON. SPU IRQ / capture still open.
+ * input, reverb, volume sweeps, noise, PMON, RAM IRQ9, capture buffers.
  *
  * Timing (2026-07 guest-clock pass): the SPU is advanced from guest system
  * cycles via spu_advance() — one stereo sample every 768 cycles (33.8688 MHz
@@ -12,6 +12,7 @@
 
 #include "spu.h"
 #include "spu_shadow.h"
+#include "interrupts.h"
 
 #include <string.h>
 
@@ -136,6 +137,12 @@ static uint32_t s_noise_mode;     /* NON */
 static uint32_t s_pmon;           /* PMON */
 static uint32_t s_noise_count;
 static uint32_t s_noise_level;    /* LFSR-ish state; output as int16 */
+
+/* IRQ9 (RAM address match) + capture buffers — DuckStation. */
+#define SPU_CAPTURE_BYTES 0x400u   /* per channel: CD L, CD R, voice1, voice3 */
+static uint16_t s_irq_address;     /* halfword units; match when *8 == byte addr */
+static int      s_spustat_irq9;    /* SPUSTAT bit6 */
+static uint16_t s_capture_pos;     /* 0..0x3FE step 2 within each 0x400 bank */
 
 static void spu_event_record(uint8_t kind, int voice, uint32_t addr) {
     SpuEvent *e = &s_events[s_event_idx & (SPU_EVENT_CAP - 1u)];
@@ -597,6 +604,40 @@ static int16_t noise_sample(void) {
     return (int16_t)(uint16_t)s_noise_level;
 }
 
+/* ---- SPU RAM IRQ9 + capture buffers ------------------------------------ */
+
+static int spu_irq_triggerable(void) {
+    uint16_t ctrl = spu_regs[reg_index(0x1F801DAAu)];
+    return ((ctrl & 0x0040u) != 0) && !s_spustat_irq9;
+}
+
+static int spu_check_ram_irq(uint32_t byte_addr) {
+    return (((uint32_t)s_irq_address * 8u) == (byte_addr & (SPU_RAM_SIZE - 1u)));
+}
+
+static void spu_trigger_ram_irq(void) {
+    if (!spu_irq_triggerable()) return;
+    s_spustat_irq9 = 1;
+    psx_irq_raise(IRQ_SPU, 0);
+}
+
+static void spu_maybe_irq_at(uint32_t byte_addr) {
+    if (spu_irq_triggerable() && spu_check_ram_irq(byte_addr & (SPU_RAM_SIZE - 1u)))
+        spu_trigger_ram_irq();
+}
+
+static void spu_write_capture(uint32_t index, int16_t value) {
+    uint32_t ram_address = (index * SPU_CAPTURE_BYTES) | (uint32_t)s_capture_pos;
+    ram_address &= (SPU_RAM_SIZE - 1u);
+    spu_ram[ram_address]     = (uint8_t)((uint16_t)value & 0xFF);
+    spu_ram[ram_address + 1] = (uint8_t)(((uint16_t)value >> 8) & 0xFF);
+    spu_maybe_irq_at(ram_address);
+}
+
+static void spu_capture_advance(void) {
+    s_capture_pos = (uint16_t)((s_capture_pos + 2u) % SPU_CAPTURE_BYTES);
+}
+
 void spu_cd_audio_reset(void) {
     memset(cd_ring, 0, sizeof(cd_ring));
     cd_read_pos = 0;
@@ -649,6 +690,9 @@ static void decode_block(SpuVoice *v) {
 
     uint32_t addr = v->cur_addr & (SPU_RAM_SIZE - 1u);
     if (addr + 16u > SPU_RAM_SIZE) addr = 0;
+
+    /* RAM IRQ9: fire when a voice reads the ADPCM block at IRQAddr*8. */
+    spu_maybe_irq_at(addr);
 
     uint8_t header = spu_ram[addr + 0u];
     uint8_t flags = spu_ram[addr + 1u];
@@ -893,6 +937,9 @@ void spu_init(void) {
     s_pmon = 0;
     s_noise_count = 0;
     s_noise_level = 1;
+    s_irq_address = 0;
+    s_spustat_irq9 = 0;
+    s_capture_pos = 0;
     memset(&s_main_vol_l, 0, sizeof(s_main_vol_l));
     memset(&s_main_vol_r, 0, sizeof(s_main_vol_r));
     spu_shadow_reset();
@@ -944,19 +991,22 @@ static void spu_mix_one_sample(int16_t* out_l, int16_t* out_r) {
                 rev_in_r += right;
             }
         }
+
+        /* Always drain CD at 44.1 kHz for capture timing; mix only if bit0. */
+        int16_t cd_l = 0;
+        int16_t cd_r = 0;
+        if (cd_audio_pop(&cd_l, &cd_r)) {
+            s_last_cd_l = cd_l;
+            s_last_cd_r = cd_r;
+        } else if (cd_push_frames != 0) {
+            cd_underflow_frames++;
+            cd_l = s_last_cd_l;
+            cd_r = s_last_cd_r;
+        } else {
+            cd_l = cd_r = 0;
+        }
+
         if (ctrl & 0x0001u) {
-            int16_t cd_l = 0;
-            int16_t cd_r = 0;
-            if (cd_audio_pop(&cd_l, &cd_r)) {
-                s_last_cd_l = cd_l;
-                s_last_cd_r = cd_r;
-            } else if (cd_push_frames != 0) {
-                cd_underflow_frames++;
-                cd_l = s_last_cd_l;
-                cd_r = s_last_cd_r;
-            } else {
-                cd_l = cd_r = 0;
-            }
             int32_t cdl = apply_volume15(cd_l, cd_vol_l);
             int32_t cdr = apply_volume15(cd_r, cd_vol_r);
             mix_l += cdl;
@@ -967,6 +1017,17 @@ static void spu_mix_one_sample(int16_t* out_l, int16_t* out_r) {
                 rev_in_r += cdr;
             }
         }
+
+        /* Capture buffers (first 4KB of SPU RAM), DuckStation/Beetle order:
+         *   0x000 CD L, 0x200 CD R (pre-volume),
+         *   0x400 voice1 last_volume, 0x600 voice3 last_volume.
+         * Writes may raise IRQ9 if IRQAddr hits the capture bank. */
+        spu_write_capture(0, cd_l);
+        spu_write_capture(1, cd_r);
+        spu_write_capture(2, (int16_t)voices[1].last_volume);
+        spu_write_capture(3, (int16_t)voices[3].last_volume);
+        spu_capture_advance();
+
         if (!mute_n) {
             mix_l = mix_r = 0;
             rev_in_l = rev_in_r = 0;
@@ -1110,7 +1171,17 @@ uint32_t spu_read(uint32_t addr) {
         uint32_t idx = reg_index(addr);
         if (idx < SPU_REG_COUNT) {
             if (addr == 0x1F801DAEu) {
-                return 0x0400; /* SPUSTAT: ready */
+                /* SPUSTAT (Beetle/nocash):
+                 *   0-5  mirror SPUCNT low bits
+                 *   6    IRQ9 flag (s_spustat_irq9)
+                 *  10    data-transfer finished / not busy (always ready here)
+                 *  11    writing 2nd half of capture buffers (CWA >= 0x200) */
+                uint16_t ctrl = spu_regs[reg_index(0x1F801DAAu)];
+                uint32_t st = (uint32_t)(ctrl & 0x3Fu);
+                if (s_spustat_irq9) st |= 0x40u;
+                st |= 0x0400u; /* transfer ready */
+                if (s_capture_pos & 0x200u) st |= 0x0800u;
+                return st;
             }
             /* ENDX (end-block-reached latch). Real hw sets bit v when voice
              * v decodes a block whose flag byte has bit 0; KEYON[v] clears
@@ -1211,6 +1282,17 @@ void spu_write(uint32_t addr, uint32_t value) {
                 s_reverb_current = s_reverb_base;
             }
 
+            /* IRQ address (halfword units; match byte = value*8). */
+            if (addr == 0x1F801DA4u) {
+                s_irq_address = (uint16_t)value;
+            }
+
+            /* SPUCNT: clearing IRQ-enable (bit6) also clears SPUSTAT.IRQ. */
+            if (addr == 0x1F801DAAu) {
+                if (((uint16_t)value & 0x0040u) == 0)
+                    s_spustat_irq9 = 0;
+            }
+
             /* Reverb configuration block 1F801DC0..1F801DFF (32 halfwords). */
             if (addr >= 0x1F801DC0u && addr <= 0x1F801DFEu) {
                 uint32_t ri = (addr - 0x1F801DC0u) / 2u;
@@ -1224,6 +1306,8 @@ void spu_write(uint32_t addr, uint32_t value) {
             }
 
             if (addr == 0x1F801DA8u) {
+                /* Manual FIFO halfword write — IRQ if this halfword hits. */
+                spu_maybe_irq_at(transfer_addr);
                 if (transfer_addr + 1 < SPU_RAM_SIZE) {
                     spu_ram[transfer_addr]     = (uint8_t)(value & 0xFF);
                     spu_ram[transfer_addr + 1] = (uint8_t)((value >> 8) & 0xFF);
@@ -1235,6 +1319,9 @@ void spu_write(uint32_t addr, uint32_t value) {
 }
 
 void spu_dma_write(uint32_t word) {
+    /* DMA word = two halfwords; check IRQ against each halfword address. */
+    spu_maybe_irq_at(transfer_addr);
+    spu_maybe_irq_at((transfer_addr + 2u) & (SPU_RAM_SIZE - 1u));
     if (transfer_addr + 3 < SPU_RAM_SIZE) {
         spu_ram[transfer_addr]     = (uint8_t)(word & 0xFF);
         spu_ram[transfer_addr + 1] = (uint8_t)((word >> 8) & 0xFF);

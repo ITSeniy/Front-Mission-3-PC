@@ -7,18 +7,9 @@
 **Layer:** framework SPU (`psxrecomp/runtime/src/spu.c`) — not FM3-specific
 
 The classic Sony logo chord is mixed with **hardware reverb** on real PS1.
-PSXRecomp's SPU is intentionally a compact model: ADPCM voices + ADSR + CD/XA
-input work; **reverb, noise, pitch-mod, volume sweeps, SPU IRQ are not
-implemented** (see `accuracy/axis5_spu.md` §2.2).
-
-Symptoms: logo (and other reverb-heavy cues) sound "thin", dry, or slightly
-wrong in pitch/envelope vs DuckStation/hardware. Audio is also **host-pulled**
-(SDL queue) rather than guest-clocked every 768 SPU cycles → subtle timing
-drift vs video.
-
-**Fix path:** implement reverb (and eventually guest-clocked SPU) in the
-framework. No safe per-game config workaround. Do **not** stub reverb in
-game.toml.
+As of 2026-07-10 the framework SPU has guest-clock timing, reverb, sweeps,
+noise, PMON, IRQ9, and capture buffers (see notes below). Retest logo vs
+DuckStation if residual dryness remains (deeper reverb/rate edge cases).
 
 ### #6 Slightly lagging cutscenes (STR / MDEC + XA)
 **Severity:** mild, playable  
@@ -85,9 +76,6 @@ only drains the guest output ring (hold-last on underrun).
 | `runtime/include/spu.h` | API |
 | `runtime/src/psx_cycles.c` | call `spu_advance` in `advance_devices` |
 
-Still missing vs full hardware SPU: reverb, noise, PMON, volume sweeps,
-SPU IRQ, capture buffers (see `accuracy/axis5_spu.md` §2.2+).
-
 **Lag fix (same day):** guest out-ring could grow without bound when the host
 SDL queue was already full or was filled with hold-samples. Cap lag at
 ~40–80 ms (drop oldest), host pump only drains real guest samples, SDL
@@ -114,12 +102,17 @@ vLOUT/vROUT. Expect richer PlayStation logo chord and hall tails.
 | **Noise (NON)** | Dr Hell / PCSX-r waveform; `SPUCNT` noise clock; replaces ADPCM when NON[voice] |
 | **PMON** | Pitch of voice N modulated by voice N−1 `last_volume` |
 
-Still open on SPU: **SPU IRQ**, capture buffers, deeper sweep/noise hardware tests.
+#### SPU IRQ9 + capture buffers (2026-07-10) — landed (pre-playthrough audio)
+
+| Feature | Behavior |
+|---|---|
+| **IRQ address match** | `0x1F801DA4` ×8 vs decode / DMA / FIFO / capture write; needs `SPUCNT.6`; raises `IRQ_SPU` (I_STAT bit9); sticky `SPUSTAT.6` until `SPUCNT.6` cleared |
+| **Capture buffers** | Each guest sample: CD L/R pre-vol → RAM `0x000`/`0x200`, voice1/3 `last_volume` → `0x400`/`0x600`; CWA advances by 2 within 1KB banks |
+| **SPUSTAT** | Low-6 mirror of SPUCNT + IRQ flag + transfer-ready (`0x400`) + capture-half (`0x800` when CWA≥0x200) |
 
 #### Still open
 
-- Retest music fades / percussion vs DuckStation.
-- SPU IRQ / capture buffers.
+- Retest music fades / percussion / stream-IRQ games vs DuckStation.
 - MDEC whole-frame decode remains architectural.
 
 ### #1 Launcher fails to link on MinGW
