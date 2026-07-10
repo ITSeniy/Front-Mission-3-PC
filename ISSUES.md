@@ -112,10 +112,22 @@ vLOUT/vROUT. Expect richer PlayStation logo chord and hall tails.
 | **Capture buffers** | Each guest sample: CD L/R pre-vol → RAM `0x000`/`0x200`, voice1/3 `last_volume` → `0x400`/`0x600`; CWA advances by 2 within 1KB banks |
 | **SPUSTAT** | Low-6 mirror of SPUCNT + IRQ flag + transfer-ready (`0x400`) + capture-half (`0x800` when CWA≥0x200) |
 
+#### Block C — MDEC residual (2026-07-10)
+
+Pixel path already Beetle-faithful (dequant/IDCT/YUV; `mdec_e2e` 0/256 diffs).
+Block C closed the remaining non-streaming gaps:
+
+| Item | State |
+|---|---|
+| 4bpp / 8bpp mono packing (D6) | Landed |
+| Status current-block + cmd mirror (D7/D3) | Landed |
+| EOB zig-zag walk (D9) | Landed (one-shot) |
+| Streaming 32-word FIFO (D8) | Open (architectural) |
+
 #### Still open
 
 - Retest music fades / percussion / stream-IRQ games vs DuckStation.
-- MDEC whole-frame decode remains architectural.
+- MDEC streaming FIFO (D8) if a title desyncs on DMA pacing.
 
 ### #1 Launcher fails to link on MinGW
 `PSX_LAUNCHER=ON` → undefined modern GL symbols (`glCreateShader`, …) from

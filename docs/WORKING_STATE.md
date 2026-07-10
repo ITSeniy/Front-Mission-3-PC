@@ -17,6 +17,8 @@ commit should match the playable boot path exercised locally.
 Under `psxrecomp-master/runtime/` (hand-edited subset):
 
 - **GPU/FMV:** depth24 present path, skip flash blank, bulk scanout
+- **MDEC (Block C):** Beetle-faithful dequant/IDCT/YUV; 4/8bpp mono pack;
+  status current-block + cmd mirror; zig-zag EOB. Still one-shot (no FIFO).
 - **SPU guest clock:** 1 sample / 768 cycles, lag-capped out-ring
 - **SPU audio model:** reverb, volume sweeps, noise (NON), PMON
 - **SPU IRQ9 + capture:** address-match → `IRQ_SPU`; CD L/R + voice1/3 banks
@@ -40,4 +42,4 @@ cd build
 ## Known open
 
 See `ISSUES.md` #5 (logo retest vs DuckStation), #6 (mild FMV cost), launcher
-MinGW link (#1). MDEC whole-frame decode remains architectural.
+MinGW link (#1). MDEC streaming FIFO (D8) still architectural.
