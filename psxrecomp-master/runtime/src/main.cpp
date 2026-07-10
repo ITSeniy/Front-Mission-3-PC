@@ -666,13 +666,14 @@ static void sdl_audio_gain_ramp(int16_t* buf, int frames, float g0, float g1) {
 static const int sdl_audio_fade_samples = 44100 * 40 / 1000;  /* 40 ms */
 static int       sdl_audio_fadein_left  = 0;
 
-/* Queue policy: keep ~120 ms of host audio buffered, hard-cap ~250 ms.
- *
- * Old path queued a fixed ~735 samples per guest vblank. When a FMV frame
- * (MDEC + present) took >16 ms wall time, the SDL device drained faster than
- * we refilled → underrun crackle. Top up from the *current* queue depth so a
- * slow frame refills after itself (call pump again on the way out of
- * sdl_vblank_present). */
+/* Host queue policy with guest-clock SPU:
+ *  - Prefer draining REAL guest samples (spu_output_frames_ready).
+ *  - Do NOT invent hundreds of held samples to "fill" SDL — that used to
+ *    fill the device buffer with frozen audio while the guest ring grew,
+ *    causing multi-second lag over time.
+ *  - Keep SDL buffer modest (~50 ms target) for low latency; top up only
+ *    with available guest audio, plus a tiny emergency hold if SDL is about
+ *    to underrun. */
 /* Set by sdl_audio_update while FMV-skip (or other turbo-mute) holds audio.
  * Trailing top-up must respect this or it would un-mute during skip. */
 static int sdl_audio_output_muted = 0;
@@ -681,21 +682,48 @@ static void sdl_audio_pump(void) {
     if (!sdl_audio_device || sdl_audio_output_muted) return;
 
     const uint32_t bytes_per_frame = sizeof(int16_t) * 2u;
-    const uint32_t target_bytes = 44100u * bytes_per_frame * 120u / 1000u; /* 120 ms */
-    const uint32_t max_bytes    = 44100u * bytes_per_frame * 250u / 1000u; /* 250 ms */
+    const uint32_t target_bytes = 44100u * bytes_per_frame * 50u / 1000u;  /* 50 ms */
+    const uint32_t max_bytes    = 44100u * bytes_per_frame * 100u / 1000u; /* 100 ms */
+    const uint32_t min_bytes    = 44100u * bytes_per_frame * 15u / 1000u;  /* ~15 ms emergency */
     uint32_t queued = SDL_GetQueuedAudioSize(sdl_audio_device);
-    if (queued >= max_bytes) return;
+    uint32_t ready  = spu_output_frames_ready();
+
+    if (queued >= max_bytes) {
+        /* SDL full: still drop guest lag by draining into the bit-bucket if the
+         * guest ring is deep — otherwise lag accumulates while device is full. */
+        if (ready > (44100u * 80u / 1000u)) {
+            int drop = (int)(ready - (44100u * 40u / 1000u));
+            if (drop > 2048) drop = 2048;
+            if (drop > 0) {
+                /* Consume without queueing: advances ring, discards audio. */
+                spu_render(sdl_audio_buf, drop);
+            }
+        }
+        return;
+    }
 
     int frames = 0;
     if (queued < target_bytes) {
-        /* Catch-up: refill toward the target so brief host spikes don't underrun. */
         frames = (int)((target_bytes - queued) / bytes_per_frame);
+        /* Only pull real guest audio for catch-up (no mass hold-fill). */
+        if ((uint32_t)frames > ready) frames = (int)ready;
+        /* Emergency: SDL almost empty and guest dry — tiny hold pad. */
+        if (frames < 64 && ready == 0 && queued < min_bytes) {
+            frames = 256;
+        }
     } else {
-        /* Queue healthy: advance at nominal 1 vblank of audio. */
+        /* Queue healthy: drain ~1 vblank of guest so the out-ring cannot grow. */
         static double sample_accum = 0.0;
         sample_accum += 44100.0 / 60.0;
         frames = (int)sample_accum;
         sample_accum -= (double)frames;
+        if ((uint32_t)frames > ready) frames = (int)ready;
+        /* If guest is ahead, drain extra toward target lag. */
+        if (ready > (44100u * 60u / 1000u)) {
+            int extra = (int)(ready - (44100u * 40u / 1000u));
+            if (extra > frames) frames = extra;
+            if (frames > 2048) frames = 2048;
+        }
     }
     if (frames < 64) return;
     if (frames > 2048) frames = 2048;
@@ -1822,6 +1850,68 @@ static void sdl_vblank_present(void) {
             return;
         }
         disabled_frame_presented = false;
+
+#ifndef PSX_SDL_NO_RENDER
+        /* FMV skip/end transition: 24-bit MDEC VRAM mis-scanned as 15-bit →
+         * rainbow garbage, or (with a non-sticky blank) the last movie frame
+         * blinks against black while Start is only held on some frames.
+         *
+         * Sticky blank: once skip is seen in depth24, stay black for the rest
+         * of the 24bpp period + a short post-exit hold. Natural 24→15 end also
+         * gets a brief blank so teardown never flashes one garbage frame. */
+        {
+            static int s_was_depth24 = 0;
+            static int s_fmv_exit_blank = 0;
+            static int s_fmv_skip_latched = 0; /* sticky from first Start in 24bpp */
+            const Uint8 *keys = SDL_GetKeyboardState(NULL);
+            int start_held = keys && (keys[SDL_SCANCODE_RETURN] || keys[SDL_SCANCODE_KP_ENTER]);
+            if (!start_held) {
+                for (int pi = 0; pi < 2; pi++) {
+                    if (g_players[pi].handle &&
+                        SDL_GameControllerGetButton(g_players[pi].handle,
+                                                    SDL_CONTROLLER_BUTTON_START)) {
+                        start_held = 1;
+                        break;
+                    }
+                }
+            }
+            if (di.depth24) {
+                s_was_depth24 = 1;
+                if (start_held || fmv_skip_active)
+                    s_fmv_skip_latched = 1;
+            } else if (s_was_depth24) {
+                s_was_depth24 = 0;
+                /* Always blank a few frames after leaving 24bpp. */
+                s_fmv_exit_blank = s_fmv_skip_latched ? 12 : 6;
+            }
+            int blank = 0;
+            if (di.depth24 && s_fmv_skip_latched) {
+                /* Sticky: every remaining 24bpp frame after skip, not only
+                 * while Start is still held (that caused frame/black blink). */
+                blank = 1;
+            } else if (!di.depth24 && s_fmv_exit_blank > 0) {
+                blank = 1;
+                s_fmv_exit_blank--;
+                if (s_fmv_exit_blank == 0)
+                    s_fmv_skip_latched = 0;
+            } else if (!di.depth24) {
+                s_fmv_skip_latched = 0;
+            }
+            if (blank) {
+                if (g_gl_active) {
+                    gl_renderer_present_blank();
+                } else if (g_vk_active) {
+                    vk_renderer_present_blank();
+                } else if (sdl_renderer) {
+                    SDL_SetRenderDrawColor(sdl_renderer, 0, 0, 0, 255);
+                    SDL_RenderClear(sdl_renderer);
+                    SDL_RenderPresent(sdl_renderer);
+                }
+                return;
+            }
+        }
+#endif
+
         w = di.width; h = di.height;
         /* 4:3-pinned frames: the pre-game BIOS boot, plus (once engaged) every
          * frame the widescreen layer presents native — FMV video and full-2D

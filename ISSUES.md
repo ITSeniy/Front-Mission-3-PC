@@ -73,11 +73,39 @@ emptied the device buffer.
 
 `PSX_VSYNC` does not affect FMV much: pacing is wall-clock + guest, not swap.
 
+#### Guest-clock SPU (2026-07-10) — landed
+
+Beetle-style sample clock: **1 stereo sample / 768 guest cycles** via
+`spu_advance()` from `psx_advance_cycles` device path. Host `spu_render`
+only drains the guest output ring (hold-last on underrun).
+
+| File | Change |
+|---|---|
+| `runtime/src/spu.c` | `spu_advance`, out-ring, mix on guest time |
+| `runtime/include/spu.h` | API |
+| `runtime/src/psx_cycles.c` | call `spu_advance` in `advance_devices` |
+
+Still missing vs full hardware SPU: reverb, noise, PMON, volume sweeps,
+SPU IRQ, capture buffers (see `accuracy/axis5_spu.md` §2.2+).
+
+**Lag fix (same day):** guest out-ring could grow without bound when the host
+SDL queue was already full or was filled with hold-samples. Cap lag at
+~40–80 ms (drop oldest), host pump only drains real guest samples, SDL
+target ~50 ms.
+
+#### FMV skip flash (2026-07-10)
+
+Manual Start-skip tears down 24-bit MDEC; for a few frames VRAM is still
+24-bit packed data but GP1 already reports 15-bit → rainbow garbage (user
+screenshot). Fix: blank present while Start is held in depth24, and ~6–10
+frames after leaving depth24.
+
 #### Still open
 
-- Guest-clock SPU (true 768-cycle) still not implemented — residual A/V rub.
+- Retest FMV skip: no rainbow flash.
 - MDEC whole-frame decode remains architectural.
 - Do **not** raise `disc_speed` for FMV (XA is forced 1× by design).
+- Optional later: SPU reverb (BIOS logo / ambience).
 
 ### #1 Launcher fails to link on MinGW
 `PSX_LAUNCHER=ON` → undefined modern GL symbols (`glCreateShader`, …) from

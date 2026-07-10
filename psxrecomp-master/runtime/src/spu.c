@@ -1,10 +1,13 @@
 /*
  * spu.c - PS1 Sound Processing Unit register and direct ADPCM voice model.
  *
- * This is intentionally still a compact hardware model: it accepts SPU
- * register reads/writes, DMA4 transfers into 512KB SPU RAM, mixes the
- * 24 direct ADPCM voices, and accepts decoded CD/XA audio on the SPU CD
- * input bus. Reverb, noise, sweep volumes, and IRQ timing are not modeled yet.
+ * Compact hardware model: SPU registers, DMA4, 24 ADPCM voices + ADSR, CD/XA
+ * input. Reverb, noise, sweep volumes, and IRQ timing are not modeled yet.
+ *
+ * Timing (2026-07 guest-clock pass): the SPU is advanced from guest system
+ * cycles via spu_advance() — one stereo sample every 768 cycles (33.8688 MHz
+ * / 44100), matching Beetle's UpdateFromCDC clock divider. Host audio
+ * (spu_render) only drains the produced sample ring; it never steps voices.
  */
 
 #include "spu.h"
@@ -58,6 +61,29 @@ static uint32_t cd_frame_count;
 static uint64_t cd_push_frames;
 static uint64_t cd_overflow_frames;
 static uint64_t cd_underflow_frames;
+
+/* Guest-clock output ring: samples produced by spu_advance, consumed by
+ * spu_render for SDL.
+ *
+ * Latency budget (not a multi-second FIFO): if guest runs slightly ahead of
+ * wall-clock (idle-skip, turbo, early frames), the ring would grow forever and
+ * audio lag accumulates. We hard-cap lag and drop oldest samples so A/V stays
+ * near real-time. */
+#define SPU_CYCLES_PER_SAMPLE 768u   /* 33868800 / 44100 */
+#define SPU_OUT_RING_FRAMES   (44100u * 1u)              /* 1 s capacity (hard) */
+#define SPU_OUT_LAG_TARGET    (44100u * 40u / 1000u)     /* keep ~40 ms */
+#define SPU_OUT_LAG_MAX       (44100u * 80u / 1000u)     /* drop down to target above this */
+static int16_t  s_out_ring[SPU_OUT_RING_FRAMES * 2u];
+static uint32_t s_out_rpos;
+static uint32_t s_out_wpos;
+static uint32_t s_out_count;
+static uint32_t s_spu_cycle_accum;
+static int16_t  s_last_out_l;
+static int16_t  s_last_out_r;
+static uint64_t s_out_overflow_frames;
+static uint64_t s_out_underflow_frames;
+static int16_t  s_last_cd_l;
+static int16_t  s_last_cd_r;
 
 /* ADSR phases — match Beetle's order so cross-process diffs read straight. */
 #define ADSR_ATTACK   0
@@ -515,12 +541,16 @@ void spu_init(void) {
     spu_cd_audio_reset();
     s_shadow_tap_on = 0;
     s_shadow_tap_frame = 0;
+    s_out_rpos = s_out_wpos = s_out_count = 0;
+    s_spu_cycle_accum = 0;
+    s_last_out_l = s_last_out_r = 0;
+    s_out_overflow_frames = s_out_underflow_frames = 0;
+    s_last_cd_l = s_last_cd_r = 0;
     spu_shadow_reset();
 }
 
-void spu_render(int16_t* out_stereo, int frames) {
-    if (!out_stereo || frames <= 0) return;
-
+/* Mix one stereo sample at guest 44.1 kHz (one SPU step). */
+static void spu_mix_one_sample(int16_t* out_l, int16_t* out_r) {
     uint16_t ctrl = spu_regs[reg_index(0x1F801DAAu)];
     int enabled = (ctrl & 0x8000u) != 0;
     int16_t main_l = direct_volume(spu_regs[reg_index(0x1F801D80u)]);
@@ -528,83 +558,144 @@ void spu_render(int16_t* out_stereo, int frames) {
     int16_t cd_vol_l = cd_input_volume(spu_regs[reg_index(0x1F801DB0u)]);
     int16_t cd_vol_r = cd_input_volume(spu_regs[reg_index(0x1F801DB2u)]);
 
-    /* Shadow tap: arm recording for this block if the float SPU shadow is on.
-     * Off by default => s_shadow_tap_on stays 0 and the mix loop is unchanged
-     * and byte-identical to upstream. */
-    s_shadow_tap_on = spu_shadow_enabled() ? 1 : 0;
+    int do_shadow = spu_shadow_enabled() ? 1 : 0;
+    s_shadow_tap_on = do_shadow;
     s_shadow_tap_frame = 0;
-    if (s_shadow_tap_on) {
-        int cap = frames < SPU_SHADOW_TAP_FRAMES ? frames : SPU_SHADOW_TAP_FRAMES;
-        memset(s_shadow_tap, 0, (size_t)cap * sizeof(s_shadow_tap[0]));
+    if (do_shadow) {
+        memset(&s_shadow_tap[0], 0, sizeof(s_shadow_tap[0]));
     }
 
-    int32_t block_peak = 0;
+    int32_t mix_l = 0;
+    int32_t mix_r = 0;
+
+    if (enabled) {
+        for (int v = 0; v < SPU_VOICE_COUNT; v++) {
+            int16_t s = voice_next_sample(v);
+            int16_t vl = direct_volume(voice_reg(v, 0));
+            int16_t vr = direct_volume(voice_reg(v, 1));
+            if (do_shadow) {
+                SpuShadowVoiceTap *t = &s_shadow_tap[0].voice[v];
+                t->vol_l = vl;
+                t->vol_r = vr;
+            }
+            if (!s) continue;
+            mix_l += ((int32_t)s * vl) >> 14;
+            mix_r += ((int32_t)s * vr) >> 14;
+        }
+        if (ctrl & 0x0001u) {
+            int16_t cd_l = 0;
+            int16_t cd_r = 0;
+            if (cd_audio_pop(&cd_l, &cd_r)) {
+                s_last_cd_l = cd_l;
+                s_last_cd_r = cd_r;
+                mix_l += ((int32_t)cd_l * cd_vol_l) >> 15;
+                mix_r += ((int32_t)cd_r * cd_vol_r) >> 15;
+            } else if (cd_push_frames != 0) {
+                cd_underflow_frames++;
+                mix_l += ((int32_t)s_last_cd_l * cd_vol_l) >> 15;
+                mix_r += ((int32_t)s_last_cd_r * cd_vol_r) >> 15;
+            }
+        }
+        mix_l = (mix_l * main_l) >> 14;
+        mix_r = (mix_r * main_r) >> 14;
+    }
+
+    int16_t ol = clamp16(mix_l);
+    int16_t or_ = clamp16(mix_r);
+
+    if (do_shadow) {
+        s_shadow_tap[0].main_l = main_l;
+        s_shadow_tap[0].main_r = main_r;
+        s_shadow_tap[0].enabled = enabled;
+        s_shadow_tap_frame = 1;
+        int16_t pair[2] = { ol, or_ };
+        spu_shadow_process(pair, 1);
+        ol = pair[0];
+        or_ = pair[1];
+    }
+
+    int32_t frame_peak = abs32(ol);
+    int32_t right_peak = abs32(or_);
+    if (right_peak > frame_peak) frame_peak = right_peak;
+    if (frame_peak) nonzero_frames++;
+    if (frame_peak > last_peak) last_peak = frame_peak;
+    if (frame_peak > peak) peak = frame_peak;
+
+    *out_l = ol;
+    *out_r = or_;
+    render_frames++;
+}
+
+static void spu_out_drop_oldest(void) {
+    if (s_out_count == 0) return;
+    s_out_rpos = (s_out_rpos + 1u) % SPU_OUT_RING_FRAMES;
+    s_out_count--;
+    s_out_overflow_frames++;
+}
+
+/* Keep the guest→host ring inside the latency budget. */
+static void spu_out_trim_lag(void) {
+    if (s_out_count <= SPU_OUT_LAG_MAX) return;
+    while (s_out_count > SPU_OUT_LAG_TARGET) {
+        spu_out_drop_oldest();
+    }
+}
+
+static void spu_out_push(int16_t l, int16_t r) {
+    if (s_out_count >= SPU_OUT_RING_FRAMES) {
+        spu_out_drop_oldest();
+    }
+    s_out_ring[s_out_wpos * 2u + 0u] = l;
+    s_out_ring[s_out_wpos * 2u + 1u] = r;
+    s_out_wpos = (s_out_wpos + 1u) % SPU_OUT_RING_FRAMES;
+    s_out_count++;
+    s_last_out_l = l;
+    s_last_out_r = r;
+    spu_out_trim_lag();
+}
+
+void spu_advance(uint32_t cycles) {
+    if (cycles == 0) return;
+    s_spu_cycle_accum += cycles;
+    /* Cap catch-up: at most ~100 ms of new samples per charge. */
+    uint32_t max_samples = SPU_OUT_LAG_MAX + (44100u / 30u);
+    uint32_t produced = 0;
+    while (s_spu_cycle_accum >= SPU_CYCLES_PER_SAMPLE && produced < max_samples) {
+        s_spu_cycle_accum -= SPU_CYCLES_PER_SAMPLE;
+        int16_t l, r;
+        spu_mix_one_sample(&l, &r);
+        spu_out_push(l, r);
+        produced++;
+    }
+    if (s_spu_cycle_accum >= SPU_CYCLES_PER_SAMPLE) {
+        s_spu_cycle_accum %= SPU_CYCLES_PER_SAMPLE;
+    }
+}
+
+uint32_t spu_output_frames_ready(void) {
+    return s_out_count;
+}
+
+void spu_render(int16_t* out_stereo, int frames) {
+    if (!out_stereo || frames <= 0) return;
+
+    /* Host consumer only — guest state was already stepped in spu_advance. */
+    spu_out_trim_lag();
     for (int f = 0; f < frames; f++) {
-        int32_t mix_l = 0;
-        int32_t mix_r = 0;
-
-        if (enabled) {
-            for (int v = 0; v < SPU_VOICE_COUNT; v++) {
-                int16_t s = voice_next_sample(v);
-                int16_t vl = direct_volume(voice_reg(v, 0));
-                int16_t vr = direct_volume(voice_reg(v, 1));
-                if (s_shadow_tap_on && f < SPU_SHADOW_TAP_FRAMES) {
-                    SpuShadowVoiceTap *t = &s_shadow_tap[f].voice[v];
-                    /* voice_next_sample already filled s[]/frac/env if active. */
-                    t->vol_l = vl;
-                    t->vol_r = vr;
-                }
-                if (!s) continue;
-                mix_l += ((int32_t)s * vl) >> 14;
-                mix_r += ((int32_t)s * vr) >> 14;
-            }
-            if (ctrl & 0x0001u) {
-                int16_t cd_l = 0;
-                int16_t cd_r = 0;
-                /* Hold last XA sample on ring underrun instead of mixing silence —
-                 * host spikes during FMV briefly empty the CD ring and silence
-                 * clicks sound like crackle. Holding freezes one sample (slight
-                 * stretch) which is far less audible than a dropout. */
-                static int16_t s_last_cd_l = 0, s_last_cd_r = 0;
-                if (cd_audio_pop(&cd_l, &cd_r)) {
-                    s_last_cd_l = cd_l;
-                    s_last_cd_r = cd_r;
-                    mix_l += ((int32_t)cd_l * cd_vol_l) >> 15;
-                    mix_r += ((int32_t)cd_r * cd_vol_r) >> 15;
-                } else if (cd_push_frames != 0) {
-                    cd_underflow_frames++;
-                    mix_l += ((int32_t)s_last_cd_l * cd_vol_l) >> 15;
-                    mix_r += ((int32_t)s_last_cd_r * cd_vol_r) >> 15;
-                }
-            }
-            mix_l = (mix_l * main_l) >> 14;
-            mix_r = (mix_r * main_r) >> 14;
-        }
-
-        out_stereo[f * 2 + 0] = clamp16(mix_l);
-        out_stereo[f * 2 + 1] = clamp16(mix_r);
-        int32_t frame_peak = abs32(out_stereo[f * 2 + 0]);
-        int32_t right_peak = abs32(out_stereo[f * 2 + 1]);
-        if (right_peak > frame_peak) frame_peak = right_peak;
-        if (frame_peak) nonzero_frames++;
-        if (frame_peak > block_peak) block_peak = frame_peak;
-
-        if (s_shadow_tap_on && f < SPU_SHADOW_TAP_FRAMES) {
-            s_shadow_tap[f].main_l  = main_l;
-            s_shadow_tap[f].main_r  = main_r;
-            s_shadow_tap[f].enabled = enabled;
-            s_shadow_tap_frame = f + 1;
+        if (s_out_count > 0) {
+            out_stereo[f * 2 + 0] = s_out_ring[s_out_rpos * 2u + 0u];
+            out_stereo[f * 2 + 1] = s_out_ring[s_out_rpos * 2u + 1u];
+            s_out_rpos = (s_out_rpos + 1u) % SPU_OUT_RING_FRAMES;
+            s_out_count--;
+            s_last_out_l = out_stereo[f * 2 + 0];
+            s_last_out_r = out_stereo[f * 2 + 1];
+        } else {
+            /* Underrun: hold last guest sample (same policy as XA ring). */
+            s_out_underflow_frames++;
+            out_stereo[f * 2 + 0] = s_last_out_l;
+            out_stereo[f * 2 + 1] = s_last_out_r;
         }
     }
-    render_frames += (uint64_t)frames;
-    last_peak = block_peak;
-    if (block_peak > peak) peak = block_peak;
-
-    /* Verified-enhancement shadow: re-render this block in float from the
-     * tap, verify against the canon mix in `out_stereo`, and substitute only
-     * while proven. No-op (byte-identical) when disabled. The canon mix above
-     * stays the authoritative output AND the verify oracle. */
-    spu_shadow_process(out_stereo, frames);
 }
 
 void spu_debug_info(SpuDebugInfo* out) {
@@ -625,8 +716,8 @@ void spu_debug_info(SpuDebugInfo* out) {
     out->peak = peak;
     out->cd_frames = cd_frame_count;
     out->cd_push_frames = cd_push_frames;
-    out->cd_overflow_frames = cd_overflow_frames;
-    out->cd_underflow_frames = cd_underflow_frames;
+    out->cd_overflow_frames = cd_overflow_frames + s_out_overflow_frames;
+    out->cd_underflow_frames = cd_underflow_frames + s_out_underflow_frames;
 }
 
 uint32_t spu_read(uint32_t addr) {
