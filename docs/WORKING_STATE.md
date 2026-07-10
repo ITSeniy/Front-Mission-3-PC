@@ -41,9 +41,9 @@ cd build
 
 ## Block C (enhancements after playable)
 
-See `docs/BLOCK_C_ENHANCEMENTS.md`: launcher MinGW (C1 done), widescreen plan
-(C2), SSAA defaults (C3), turbo docs (C4), FMV skip RE (C5: no table; START
-fallback — `docs/FMV_SKIP_RE.md`).
+See `docs/BLOCK_C_ENHANCEMENTS.md`: launcher MinGW (C1), widescreen Phase 0
+(C2 — `docs/WIDESCREEN_FM3.md`), SSAA (C3), turbo (C4), FMV skip RE (C5 —
+`docs/FMV_SKIP_RE.md`).
 
 ## Known open
 

@@ -24,7 +24,7 @@ Details: `docs/WORKING_STATE.md`.
 | SPU reverb / sweeps / noise / PMON | Done |
 | SPU IRQ9 + capture buffers | Done |
 | Playthrough A (logo → FMV → menu → gameplay) | In progress |
-| Block C enhancements (launcher/WS/SSAA/turbo/FMV skip) | Started — see `docs/BLOCK_C_ENHANCEMENTS.md` |
+| Block C enhancements (launcher/WS/SSAA/turbo/FMV skip) | C1/C3/C4 done; C2 WS Phase 0; C5 RE notes — `docs/BLOCK_C_ENHANCEMENTS.md` |
 
 ### Run
 

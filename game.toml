@@ -44,12 +44,21 @@ antialiasing = true
 # nearest = native PS look (UI-heavy FM3). bilinear softens 2D panels.
 texture_filtering = "nearest"
 renderer = "opengl"
-# 16:9 is experimental for FM3 (lots of 2D UI) — keep 4:3 until C2 tags land.
+# Widescreen (C2): default 4:3 is identity. 16:9 is EXPERIMENTAL for FM3
+# (heavy 2D UI). Enable via launcher Aspect ratio or settings.toml — see
+# docs/WIDESCREEN_FM3.md. Phase 0 = runtime hooks only (no sprite_tag regen yet).
 aspect_ratio = "4:3"
 # FMV skip (C5): no static frame-total table in FM3 (see docs/FMV_SKIP_RE.md).
 # auto_skip_fmv=true uses START injection only (no fmv_skip_total_table).
 # Manual Start during movies still works. Leave false for normal playthrough.
 auto_skip_fmv = false
+
+# Widescreen proportion hooks — inert at 4:3; engage when aspect is wide.
+# No sprite_tag_funcs yet (needs Ghidra + regen). Runtime-only knobs below.
+[widescreen]
+offer           = true    # launcher EXPERIMENTAL 16:9 toggle
+hud_sprt_squash = true    # keep untagged SPRT HUD/menus nearer native proportions
+gte_game_mode   = true    # GTE-heavy frames = gameplay (menus stay 4:3-ish present)
 
 [controller]
 default_analog = false

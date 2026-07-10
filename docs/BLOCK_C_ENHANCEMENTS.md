@@ -6,7 +6,7 @@ safe quality-of-life knobs. Tracker for Front Mission 3 (SLUS-01011).
 | Item | Goal | Status |
 |---|---|---|
 | **C1 Launcher** | `PSX_LAUNCHER=ON` on MinGW | In progress (GL load via SDL) |
-| **C2 Widescreen** | 16:9 where 3D allows; 2D UI strategy | Design only (harder than Tomba) |
+| **C2 Widescreen** | 16:9 where 3D allows; 2D UI strategy | Phase 0: opt-in + hud_sprt/gte_game_mode — `docs/WIDESCREEN_FM3.md` |
 | **C3 SSAA / filtering** | Sharper present without breaking UI | Easy knobs in `game.toml` |
 | **C4 Turbo loads** | Already on — tune engage / docs | Fine-tune / document |
 | **C5 Skip FMV** | Game’s own end-of-movie path | RE done: no static table; START fallback only — see `docs/FMV_SKIP_RE.md` |
@@ -37,27 +37,14 @@ configured OFF; after the link fix, leave ON.
 
 ## C2 — Widescreen (FM3-specific hardness)
 
-Framework already has:
+**Phase 0 landed** — see **`docs/WIDESCREEN_FM3.md`**.
 
-- GTE X-squash via `[video] aspect_ratio = "16:9"`
-- `[widescreen]` sprite_tag / backdrop / cull hooks (Tomba-tuned)
+- Default `aspect_ratio = "4:3"` (identity).
+- `[widescreen] offer=true`, `hud_sprt_squash=true`, `gte_game_mode=true` (runtime).
+- Launcher 16:9 toggle available (EXPERIMENTAL).
+- **Not yet:** `sprite_tag_funcs`, `auto_screen_x`, backdrop sites (need Ghidra + regen).
 
-FM3 is **menu- and 2D-UI heavy** (wanzer setup, maps, dialog boxes, radar).
-Blind 16:9 will:
-
-- Stretch HUD / text / 2D panels
-- Leave empty sides on pure 2D screens
-- Need per-scene sprite tags or “letterbox 2D, widen 3D only”
-
-**Plan (do not rush defaults):**
-
-1. Keep shipping default `aspect_ratio = "4:3"`.
-2. Optional experimental `16:9` via launcher / `settings.toml` for 3D combat
-   screenshots only.
-3. After playthrough maps main 2D draw paths → `[widescreen]` tags (like Tomba).
-4. Document user-facing EXPERIMENTAL tag.
-
-See framework `WIDESCREEN.md`.
+Framework: `psxrecomp/WIDESCREEN.md`.
 
 ---
 
