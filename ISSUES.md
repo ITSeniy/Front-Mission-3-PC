@@ -106,10 +106,20 @@ DuckStation/psx-spx reverb unit: FIR halfband 44.1↔22.05, IIR/comb/APF
 network in SPU RAM work area (mBASE), EON voice sends, CD reverb bit,
 vLOUT/vROUT. Expect richer PlayStation logo chord and hall tails.
 
+#### SPU sweeps / noise / PMON (2026-07-10) — landed (B)
+
+| Feature | Behavior |
+|---|---|
+| **Volume sweeps** | Voice L/R + main L/R: fixed (`bit15=0`) or sweep envelope (DuckStation `VolumeSweep`) |
+| **Noise (NON)** | Dr Hell / PCSX-r waveform; `SPUCNT` noise clock; replaces ADPCM when NON[voice] |
+| **PMON** | Pitch of voice N modulated by voice N−1 `last_volume` |
+
+Still open on SPU: **SPU IRQ**, capture buffers, deeper sweep/noise hardware tests.
+
 #### Still open
 
-- Retest BIOS logo reverb quality vs DuckStation.
-- Noise / PMON / volume sweeps / SPU IRQ still missing.
+- Retest music fades / percussion vs DuckStation.
+- SPU IRQ / capture buffers.
 - MDEC whole-frame decode remains architectural.
 
 ### #1 Launcher fails to link on MinGW

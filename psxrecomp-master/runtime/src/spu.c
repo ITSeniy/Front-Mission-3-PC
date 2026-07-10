@@ -2,7 +2,7 @@
  * spu.c - PS1 Sound Processing Unit register and direct ADPCM voice model.
  *
  * Compact hardware model: SPU registers, DMA4, 24 ADPCM voices + ADSR, CD/XA
- * input. Reverb, noise, sweep volumes, and IRQ timing are not modeled yet.
+ * input, reverb, volume sweeps, noise, PMON. SPU IRQ / capture still open.
  *
  * Timing (2026-07 guest-clock pass): the SPU is advanced from guest system
  * cycles via spu_advance() — one stereo sample every 768 cycles (33.8688 MHz
@@ -91,6 +91,23 @@ static int16_t  s_last_cd_r;
 #define ADSR_SUSTAIN  2
 #define ADSR_RELEASE  3
 
+/* Volume envelope/sweep — DuckStation VolumeEnvelope / VolumeSweep (psx-spx). */
+typedef struct {
+    uint32_t counter;
+    uint16_t counter_increment;
+    int16_t  step;
+    uint8_t  rate;
+    uint8_t  decreasing;
+    uint8_t  exponential;
+    uint8_t  phase_invert;
+} VolEnvelope;
+
+typedef struct {
+    VolEnvelope env;
+    int16_t current_level;
+    uint8_t active;
+} VolSweep;
+
 typedef struct {
     int active;
     uint32_t cur_addr;
@@ -106,9 +123,19 @@ typedef struct {
     uint16_t env_level;     /* 0..0x7FFF — applied to raw decoded sample */
     uint32_t adsr_divider;  /* fixed-point counter; level updates on overflow */
     uint8_t  adsr_phase;    /* ADSR_ATTACK / DECAY / SUSTAIN / RELEASE */
+
+    VolSweep vol_l;
+    VolSweep vol_r;
+    int32_t  last_volume;   /* mono post-ADSR for PMON of next voice */
 } SpuVoice;
 
 static SpuVoice voices[SPU_VOICE_COUNT];
+static VolSweep s_main_vol_l;
+static VolSweep s_main_vol_r;
+static uint32_t s_noise_mode;     /* NON */
+static uint32_t s_pmon;           /* PMON */
+static uint32_t s_noise_count;
+static uint32_t s_noise_level;    /* LFSR-ish state; output as int16 */
 
 static void spu_event_record(uint8_t kind, int voice, uint32_t addr) {
     SpuEvent *e = &s_events[s_event_idx & (SPU_EVENT_CAP - 1u)];
@@ -439,24 +466,135 @@ static inline uint16_t voice_reg(int voice, int reg) {
     return spu_regs[(uint32_t)voice * 8u + (uint32_t)reg];
 }
 
-static inline int16_t direct_volume(uint16_t raw) {
-    int32_t v;
-    if (raw & 0x8000u) {
-        /* Sweep mode is not modeled; use the magnitude as a direct volume. */
-        v = (int32_t)(raw & 0x7FFFu);
-    } else {
-        v = (int32_t)(raw & 0x7FFFu);
-        if (v & 0x4000) v -= 0x8000;
-    }
-    if (v > 0x3FFF) v = 0x3FFF;
-    if (v < -0x4000) v = -0x4000;
-    return (int16_t)v;
-}
-
 static inline int16_t cd_input_volume(uint16_t raw) {
     /* CD input volume registers use signed 16-bit linear gain; games commonly
      * program 0x7FFF for full-scale CD audio. */
     return (int16_t)raw;
+}
+
+/* ---- Volume sweep (DuckStation VolumeEnvelope/VolumeSweep) ------------- */
+
+static void vol_env_reset(VolEnvelope *e, uint8_t rate, uint8_t rate_mask,
+                          int decreasing, int exponential, int phase_invert) {
+    e->rate = rate;
+    e->decreasing = decreasing ? 1 : 0;
+    e->exponential = exponential ? 1 : 0;
+    e->phase_invert = (phase_invert && !(decreasing && exponential)) ? 1 : 0;
+    e->counter = 0;
+    e->counter_increment = 0x8000;
+
+    int16_t base_step = (int16_t)(7 - (rate & 3));
+    int dec_xor = (decreasing ^ phase_invert) | (decreasing & exponential);
+    e->step = dec_xor ? (int16_t)(~base_step) : base_step;
+    if (rate < 44) {
+        e->step = (int16_t)(e->step << (11 - (rate >> 2)));
+    } else if (rate >= 48) {
+        e->counter_increment = (uint16_t)(e->counter_increment >> ((rate >> 2) - 11));
+        if ((rate & rate_mask) != rate_mask) {
+            if (e->counter_increment < 1) e->counter_increment = 1;
+        }
+    }
+}
+
+static int vol_env_tick(VolEnvelope *e, int16_t *current_level) {
+    uint32_t this_inc = e->counter_increment;
+    int32_t this_step = e->step;
+    if (e->exponential) {
+        if (e->decreasing) {
+            this_step = (this_step * (int32_t)*current_level) >> 15;
+        } else if (*current_level >= 0x6000) {
+            if (e->rate < 40) {
+                this_step >>= 2;
+            } else if (e->rate >= 44) {
+                this_inc >>= 2;
+            } else {
+                this_step >>= 1;
+                this_inc >>= 1;
+            }
+        }
+    }
+
+    e->counter += this_inc;
+    if (!(e->counter & 0x8000u))
+        return 1;
+    e->counter = 0;
+
+    int32_t new_level = (int32_t)*current_level + this_step;
+    if (!e->decreasing) {
+        if (new_level > 32767) new_level = 32767;
+        if (new_level < -32768) new_level = -32768;
+        *current_level = (int16_t)new_level;
+        return new_level != ((this_step < 0) ? -32768 : 32767);
+    }
+    if (e->phase_invert) {
+        if (new_level > 0) new_level = 0;
+        if (new_level < -32768) new_level = -32768;
+        *current_level = (int16_t)new_level;
+        return new_level != 0;
+    }
+    if (new_level < 0) new_level = 0;
+    *current_level = (int16_t)new_level;
+    return new_level != 0;
+}
+
+static void vol_sweep_reset(VolSweep *s, uint16_t reg) {
+    if (!(reg & 0x8000u)) {
+        int32_t fv = (int32_t)(reg & 0x7FFFu);
+        if (fv & 0x4000) fv |= (int32_t)~0x7FFF;
+        int32_t lvl = fv * 2;
+        if (lvl > 32767) lvl = 32767;
+        if (lvl < -32768) lvl = -32768;
+        s->current_level = (int16_t)lvl;
+        s->active = 0;
+        return;
+    }
+    vol_env_reset(&s->env,
+                  (uint8_t)(reg & 0x7Fu),
+                  0x7Fu,
+                  (reg & 0x2000u) != 0,
+                  (reg & 0x4000u) != 0,
+                  (reg & 0x1000u) != 0);
+    s->active = (s->env.counter_increment > 0) ? 1 : 0;
+}
+
+static void vol_sweep_tick(VolSweep *s) {
+    if (!s->active) return;
+    s->active = vol_env_tick(&s->env, &s->current_level) ? 1 : 0;
+}
+
+static inline int16_t direct_volume(uint16_t raw) {
+    VolSweep tmp;
+    vol_sweep_reset(&tmp, raw);
+    return tmp.current_level;
+}
+
+/* ---- Noise (Dr Hell / PCSX-r / DuckStation) ---------------------------- */
+
+static void update_noise(void) {
+    static const uint8_t noise_wave_add[64] = {
+        1,0,0,1,0,1,1,0,1,0,0,1,0,1,1,0,1,0,0,1,0,1,1,0,1,0,0,1,0,1,1,0,
+        0,1,1,0,1,0,0,1,0,1,1,0,1,0,0,1,0,1,1,0,1,0,0,1,0,1,1,0,1,0,0,1
+    };
+    static const uint8_t noise_freq_add[5] = { 0, 84, 140, 180, 210 };
+
+    uint16_t ctrl = spu_regs[reg_index(0x1F801DAAu)];
+    uint32_t noise_clock = (ctrl >> 8) & 0x3Fu;
+    uint32_t level = (0x8000u >> (noise_clock >> 2)) << 16;
+
+    s_noise_count += 0x10000u + noise_freq_add[noise_clock & 3u];
+    if ((s_noise_count & 0xFFFFu) >= noise_freq_add[4]) {
+        s_noise_count += 0x10000u;
+        s_noise_count -= noise_freq_add[noise_clock & 3u];
+    }
+    if (s_noise_count < level)
+        return;
+    s_noise_count %= level;
+    s_noise_level = (s_noise_level << 1) |
+                    (uint32_t)noise_wave_add[(s_noise_level >> 10) & 63u];
+}
+
+static int16_t noise_sample(void) {
+    return (int16_t)(uint16_t)s_noise_level;
 }
 
 void spu_cd_audio_reset(void) {
@@ -625,11 +763,18 @@ static int16_t voice_next_sample(int idx) {
         decode_block(v);
     }
 
-    int16_t raw_s = v->samples[v->sample_idx];
+    /* Noise replaces ADPCM sample when NON[voice] is set. */
+    int16_t raw_s;
+    if (s_noise_mode & (1u << idx))
+        raw_s = noise_sample();
+    else
+        raw_s = v->samples[v->sample_idx];
+
     /* Apply envelope (0..0x7FFF as a 15-bit gain). */
     int32_t shaped = ((int32_t)raw_s * (int32_t)v->env_level) >> 15;
     if (shaped > 32767)  shaped = 32767;
     if (shaped < -32768) shaped = -32768;
+    v->last_volume = shaped;
 
     /* Shadow tap: record the four decoded samples bracketing the current
      * sample position + the fractional phase + envelope, BEFORE the phase
@@ -660,7 +805,16 @@ static int16_t voice_next_sample(int idx) {
         v->active = 0;
     }
 
+    /* Pitch (+ optional PMON from previous voice last_volume). */
     uint32_t pitch = voice_reg(idx, 2) & 0x3FFFu;
+    if (idx > 0 && (s_pmon & (1u << idx))) {
+        int32_t factor = voices[idx - 1].last_volume;
+        if (factor < -0x8000) factor = -0x8000;
+        if (factor > 0x7FFF) factor = 0x7FFF;
+        factor += 0x8000;
+        pitch = (uint32_t)(((int32_t)pitch * factor) >> 15) & 0xFFFFu;
+    }
+    if (pitch > 0x3FFFu) pitch = 0x3FFFu;
     if (pitch == 0) pitch = 0x1000u;
     v->phase += pitch;
     while (v->phase >= 0x1000u) {
@@ -685,6 +839,10 @@ static void key_on(uint32_t mask) {
         v->env_level = 0;
         v->adsr_divider = 0;
         v->adsr_phase = ADSR_ATTACK;
+        v->last_volume = 0;
+        /* Re-latch current volume regs (fixed or sweep start). */
+        vol_sweep_reset(&v->vol_l, voice_reg(i, 0));
+        vol_sweep_reset(&v->vol_r, voice_reg(i, 1));
         key_on_count++;
         endx_latch &= ~(1u << i);  /* KEYON clears ENDX bit on real hw */
         spu_event_record(SPU_EV_KEYON, i, v->cur_addr);
@@ -731,6 +889,12 @@ void spu_init(void) {
     s_out_overflow_frames = s_out_underflow_frames = 0;
     s_last_cd_l = s_last_cd_r = 0;
     reverb_reset();
+    s_noise_mode = 0;
+    s_pmon = 0;
+    s_noise_count = 0;
+    s_noise_level = 1;
+    memset(&s_main_vol_l, 0, sizeof(s_main_vol_l));
+    memset(&s_main_vol_r, 0, sizeof(s_main_vol_r));
     spu_shadow_reset();
 }
 
@@ -739,8 +903,6 @@ static void spu_mix_one_sample(int16_t* out_l, int16_t* out_r) {
     uint16_t ctrl = spu_regs[reg_index(0x1F801DAAu)];
     int enabled = (ctrl & 0x8000u) != 0;
     int mute_n  = (ctrl & 0x4000u) != 0; /* 0 = muted */
-    int16_t main_l = direct_volume(spu_regs[reg_index(0x1F801D80u)]);
-    int16_t main_r = direct_volume(spu_regs[reg_index(0x1F801D82u)]);
     int16_t cd_vol_l = cd_input_volume(spu_regs[reg_index(0x1F801DB0u)]);
     int16_t cd_vol_r = cd_input_volume(spu_regs[reg_index(0x1F801DB2u)]);
 
@@ -758,18 +920,23 @@ static void spu_mix_one_sample(int16_t* out_l, int16_t* out_r) {
     uint32_t eon = s_eon_latch;
 
     if (enabled) {
+        update_noise();
+
         for (int v = 0; v < SPU_VOICE_COUNT; v++) {
             int16_t s = voice_next_sample(v);
-            int16_t vl = direct_volume(voice_reg(v, 0));
-            int16_t vr = direct_volume(voice_reg(v, 1));
+            int16_t vl = voices[v].vol_l.current_level;
+            int16_t vr = voices[v].vol_r.current_level;
             if (do_shadow) {
                 SpuShadowVoiceTap *t = &s_shadow_tap[0].voice[v];
                 t->vol_l = vl;
                 t->vol_r = vr;
             }
-            if (!s) continue;
-            int32_t left  = ((int32_t)s * vl) >> 14;
-            int32_t right = ((int32_t)s * vr) >> 14;
+            vol_sweep_tick(&voices[v].vol_l);
+            vol_sweep_tick(&voices[v].vol_r);
+            if (!s && !(s_noise_mode & (1u << v))) continue;
+            /* DuckStation: ApplyVolume(sample, channel_vol) >> 15 */
+            int32_t left  = apply_volume15(s, vl);
+            int32_t right = apply_volume15(s, vr);
             mix_l += left;
             mix_r += right;
             if (eon & (1u << v)) {
@@ -790,8 +957,8 @@ static void spu_mix_one_sample(int16_t* out_l, int16_t* out_r) {
             } else {
                 cd_l = cd_r = 0;
             }
-            int32_t cdl = ((int32_t)cd_l * cd_vol_l) >> 15;
-            int32_t cdr = ((int32_t)cd_r * cd_vol_r) >> 15;
+            int32_t cdl = apply_volume15(cd_l, cd_vol_l);
+            int32_t cdr = apply_volume15(cd_r, cd_vol_r);
             mix_l += cdl;
             mix_r += cdr;
             /* SPUCNT bit2: CD audio to reverb */
@@ -811,16 +978,19 @@ static void spu_mix_one_sample(int16_t* out_l, int16_t* out_r) {
         mix_l += rev_out_l;
         mix_r += rev_out_r;
 
-        mix_l = (clamp16(mix_l) * main_l) >> 14;
-        mix_r = (clamp16(mix_r) * main_r) >> 14;
+        /* Main volume (with sweep) after dry+reverb clamp. */
+        mix_l = apply_volume15(clamp16(mix_l), s_main_vol_l.current_level);
+        mix_r = apply_volume15(clamp16(mix_r), s_main_vol_r.current_level);
+        vol_sweep_tick(&s_main_vol_l);
+        vol_sweep_tick(&s_main_vol_r);
     }
 
     int16_t ol = clamp16(mix_l);
     int16_t or_ = clamp16(mix_r);
 
     if (do_shadow) {
-        s_shadow_tap[0].main_l = main_l;
-        s_shadow_tap[0].main_r = main_r;
+        s_shadow_tap[0].main_l = s_main_vol_l.current_level;
+        s_shadow_tap[0].main_r = s_main_vol_r.current_level;
         s_shadow_tap[0].enabled = enabled;
         s_shadow_tap_frame = 1;
         int16_t pair[2] = { ol, or_ };
@@ -994,6 +1164,36 @@ void spu_write(uint32_t addr, uint32_t value) {
                 key_off((uint32_t)(uint16_t)value << 16);
             }
 
+            /* Per-voice volume L/R (sweep or fixed). */
+            if (addr >= 0x1F801C00u && addr < 0x1F801D80u) {
+                uint32_t vidx = (addr - 0x1F801C00u) / 16u;
+                uint32_t voff = (addr - 0x1F801C00u) % 16u;
+                if (vidx < (uint32_t)SPU_VOICE_COUNT) {
+                    if (voff == 0)
+                        vol_sweep_reset(&voices[vidx].vol_l, (uint16_t)value);
+                    else if (voff == 2)
+                        vol_sweep_reset(&voices[vidx].vol_r, (uint16_t)value);
+                }
+            }
+
+            /* Main volume L/R. */
+            if (addr == 0x1F801D80u)
+                vol_sweep_reset(&s_main_vol_l, (uint16_t)value);
+            if (addr == 0x1F801D82u)
+                vol_sweep_reset(&s_main_vol_r, (uint16_t)value);
+
+            /* PMON — pitch modulation enable. */
+            if (addr == 0x1F801D90u)
+                s_pmon = (s_pmon & 0xFFFF0000u) | (uint32_t)(uint16_t)value;
+            if (addr == 0x1F801D92u)
+                s_pmon = (s_pmon & 0x0000FFFFu) | ((uint32_t)(uint16_t)value << 16);
+
+            /* NON — noise mode enable. */
+            if (addr == 0x1F801D94u)
+                s_noise_mode = (s_noise_mode & 0xFFFF0000u) | (uint32_t)(uint16_t)value;
+            if (addr == 0x1F801D96u)
+                s_noise_mode = (s_noise_mode & 0x0000FFFFu) | ((uint32_t)(uint16_t)value << 16);
+
             /* EON — per-voice reverb enable (24 bits). */
             if (addr == 0x1F801D98u) {
                 s_eon_latch = (s_eon_latch & 0xFFFF0000u) | (uint32_t)(uint16_t)value;
@@ -1080,10 +1280,8 @@ void spu_get_global_state(SpuGlobalState* out) {
     out->main_vol_r = spu_regs[reg_index(0x1F801D82u)];
     out->kon_latch  = kon_latch & 0xFFFFFFu;
     out->koff_latch = koff_latch & 0xFFFFFFu;
-    out->pmon = (uint32_t)spu_regs[reg_index(0x1F801D90u)] |
-                ((uint32_t)spu_regs[reg_index(0x1F801D92u)] << 16);
-    out->non  = (uint32_t)spu_regs[reg_index(0x1F801D94u)] |
-                ((uint32_t)spu_regs[reg_index(0x1F801D96u)] << 16);
+    out->pmon = s_pmon;
+    out->non  = s_noise_mode;
     out->eon  = s_eon_latch;
     out->endx = endx_latch & 0xFFFFFFu;
     uint32_t am = 0;
