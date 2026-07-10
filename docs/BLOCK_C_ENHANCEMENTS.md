@@ -9,7 +9,7 @@ safe quality-of-life knobs. Tracker for Front Mission 3 (SLUS-01011).
 | **C2 Widescreen** | 16:9 where 3D allows; 2D UI strategy | Design only (harder than Tomba) |
 | **C3 SSAA / filtering** | Sharper present without breaking UI | Easy knobs in `game.toml` |
 | **C4 Turbo loads** | Already on — tune engage / docs | Fine-tune / document |
-| **C5 Skip FMV** | Game’s own end-of-movie path | Needs FM3 RE addresses |
+| **C5 Skip FMV** | Game’s own end-of-movie path | RE done: no static table; START fallback only — see `docs/FMV_SKIP_RE.md` |
 
 ---
 
@@ -92,26 +92,25 @@ constant / optional config — not required for v1).
 
 ## C5 — Skip FMV (`fmv_skip_*`)
 
-Tomba pattern (`ENHANCEMENTS.md` E1):
+Tomba uses a **static** per-movie frame-total table. FM3 does **not** (RE 2026-07-10):
+
+- 26 STRs under `\MV\MOVxx.STR` (no MOV10)
+- Player overlay `\YMV.BIN` (path list + PsyQ MDEC strings)
+- Frame totals extracted from STR headers — **not** present as a u16 table in EXE/YMV/disc
+- End condition is likely stream EOF / PsyQ St\*, not `frame >= total-3`
+
+Full notes + frame inventory: **`docs/FMV_SKIP_RE.md`**.
+
+**Practical skip today:**
 
 ```toml
 [video]
-auto_skip_fmv = false   # launcher can enable
-fmv_skip_total_table = 0x80077728  # u16 table, index = movie_id
-fmv_skip_movie_id    = 0x1F8001CD  # scratchpad movie id byte
-fmv_skip_end_total   = 3
-# fmv_skip_no_xa = false  # set true only if movies have no XA
+auto_skip_fmv = false   # true => START injection (no table required)
+# do not set fmv_skip_total_table / fmv_skip_movie_id for FM3 yet
 ```
 
-Runtime writes `table[movie_id] = end_total` so the **game’s** MDEC player
-exits on the next frame.
-
-**FM3:** addresses unknown until RE on STR player (Ghidra / live RAM during
-intro FMV). Until then:
-
-- Leave `auto_skip_fmv = false`
-- Manual Start-skip still works (blank/skip path already polished)
-- Optional generic hold-Start fallback exists without table (worse UX)
+Manual Start during FMV still works. Table-based instant skip needs live RAM RE
+during playback (see FMV_SKIP_RE.md “Next RE steps”).
 
 ---
 

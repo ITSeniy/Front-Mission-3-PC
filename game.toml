@@ -46,7 +46,9 @@ texture_filtering = "nearest"
 renderer = "opengl"
 # 16:9 is experimental for FM3 (lots of 2D UI) — keep 4:3 until C2 tags land.
 aspect_ratio = "4:3"
-# FMV auto-skip needs FM3 fmv_skip_* addresses (C5); manual Start skip works.
+# FMV skip (C5): no static frame-total table in FM3 (see docs/FMV_SKIP_RE.md).
+# auto_skip_fmv=true uses START injection only (no fmv_skip_total_table).
+# Manual Start during movies still works. Leave false for normal playthrough.
 auto_skip_fmv = false
 
 [controller]
