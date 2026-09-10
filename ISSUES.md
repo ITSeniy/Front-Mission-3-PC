@@ -6,7 +6,7 @@ Working snapshot: `docs/WORKING_STATE.md` (2026-07-10, post-SPU IRQ/capture).
 
 ### #5 Strange / dry sound on PlayStation BIOS logo
 **Severity:** player-audible, cosmetic for boot  
-**Layer:** framework SPU (`psxrecomp/runtime/src/spu.c`) — not FM3-specific
+**Layer:** framework SPU (`psxrecomp-master/runtime/src/spu.c`) — not FM3-specific
 
 The classic Sony logo chord is mixed with **hardware reverb** on real PS1.
 As of 2026-07-10 the framework SPU has guest-clock timing, reverb, sweeps,
@@ -168,20 +168,34 @@ jal   0x800AC57C
 
 Then game hits **BIOS B0** table stubs (`0x800B20C0` family: `li t2,0xB0; jr t2; li t1,N`) under **full LLE** (`bios_hle=false`). Process dies without `psx_fatal_halt` (`fatal: null`).
 
-#### Working theory
-Post-training **mode switch** (unload training → load city/setup): overlay at `0x8014D000` runs a multi-file load, then BIOS pad/card/kernel re-init. Failure is either:
+#### Current localization
+The process does not SEH-crash: `psx_scheduler_run` returns after the outer
+dispatch publishes `PC=0`, then `main` performs normal SDL/GL teardown. The last
+visible path is the scene-loader overlay followed by BIOS `B0:0x0C`
+(`EnableEvent`). No unknown dispatch, fatal halt, call-bail, or stack overflow is
+recorded.
 
-1. Host crash/SEH during that window (GL / overlay DLL / BIOS LLE) → untagged `exit`, or  
-2. Guest wild jump after a failed load, with atexit snapshot too late to be trustworthy.
+HLE and legacy captures now agree on the failure contract. Worker TCB
+`0xA000E35C` legitimately reaches `jr $ra` with a zero entry return address,
+while PCB[0] already names runnable TCB `0xA000E29C`. The legacy fiber path
+restores `0xA000E29C` at `0x800B48E4` and then incorrectly overwrites the
+continuation with `PC=0`; the HLE scheduler likewise treats the dispatch return
+as a process exit because it did not remember which TCB the long-running
+dispatch originally started for.
 
-Many CRC variants of `0014D000_*.dll` already in `build/cache` — not a “zero coverage” miss.
+PSXRecomp now preserves the restored legacy continuation and, in HLE mode,
+resumes a valid PCB[0] TCB when it differs from the TCB whose dispatch just
+completed. This is a framework-level scheduler fix and still needs the full
+post-training playthrough validation.
 
 #### Next debug steps
-1. Rebuild **RelWithDebInfo** + `PSX_DEBUG_TOOLS=ON` (TCP 4480) and re-hit training end.  
-2. Keep `psx_crash.txt` / SEH dump if generated.  
-3. After the bad session: `python psxrecomp/tools/compile_overlays.py --captures build/overlay_captures.json ...` then retry.  
-4. Optional A/B: `bios_hle=true` only as a probe (not a long-term fix).  
-5. Trace CD open for the resource keyed by **2845** / type **0xAA01**.
+1. Run `tools/run_debug.ps1`, finish training, and leave the halted process open.
+2. Run `python tools/capture_scheduler.py` to capture scheduler, TCB, thread,
+   fntrace, freeze, the final three frames of IRQ-context history, and write
+   provenance for the complete current-TCB context.
+3. Verify the scheduler ring records `0xA000E35C -> 0xA000E29C` and execution
+   continues from the restored `0x800B48E4` context.
+4. Repeat with `tools/run_debug.ps1 -LegacyScheduler` as an A/B regression probe.
 
 ## Closed / mitigated
 

@@ -15,6 +15,10 @@
 /psxrecomp/runtime/build/
 /psxrecomp-master/runtime/build/
 
+# Optional local compatibility junction. The tracked framework source lives in
+# psxrecomp-master/ and builds must not depend on this link existing.
+/psxrecomp
+
 # Release packaging artifacts
 release-stage/
 *.zip
@@ -32,6 +36,7 @@ release-stage/
 *.ccd
 *.mcd
 *.mcr
+*.mcd.*
 
 # Keep intentional exception for docs assets if any later
 !docs/**/*.png
@@ -64,8 +69,6 @@ psxrecomp-master/recompiler/build/
 psxrecomp-master/runtime/build/
 psxrecomp-master/generated/
 psxrecomp-master/bios/
-psxrecomp-master/lib/RmlUi/
-psxrecomp-master/lib/freetype/
 TombaRecomp-master/
 
 # Diagnostic dumps (root-level)
@@ -76,5 +79,111 @@ TombaRecomp-master/
 # Python caches
 __pycache__/
 
-# Framework vendored clones (if re-cloned into tree)
-# Note: psxrecomp-master is kept as local framework dump for now
+# Framework source under psxrecomp-master/ is intentionally vendored. Its two
+# large third-party dependencies are root-level Git submodules (see .gitmodules).
+
+# --- Portfolio repository safety defaults ---
+# IDE and OS
+.vs/
+.idea/
+.vscode/*.user
+*.user
+*.suo
+.DS_Store
+Thumbs.db
+
+# Build outputs
+bin/
+obj/
+build/
+build-*/
+dist/
+out/
+target/
+Debug/
+Release/
+.next/
+node_modules/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+secrets.json
+credentials.json
+config.local.*
+*.private.*
+*.key
+*.pem
+!*.example.pem
+
+# Logs, caches, archives and generated executables
+*.log
+*.tmp
+*.cache
+*.dmp
+*.pdb
+*.exe
+*.dll
+*.zip
+*.7z
+*.rar
+
+# Proprietary game dumps and extracted runtime data
+*.iso
+*.cue
+*.chd
+*.rom
+*.nes
+*.sfc
+*.smc
+*.gba
+*.gb
+*.xex
+*.pak
+*.wad
+*_Data/
+
+# Large media should be replaced by legal samples or tracked with Git LFS
+*.mkv
+*.mp4
+*.wav
+*.ogg
+*.flac
+
+# Local application state
+saves/
+local-data/
+
+# --- Portfolio large-artifact exclusions ---
+# Generated packages, disk images and ML checkpoints
+*.apk
+*.apk.gz
+*.aab
+*.tar
+*.tar.gz
+*.keras
+*.h5
+*.onnx
+*.pt
+*.pth
+*.ckpt
+*.npz
+*.pac
+
+# Generated or locally extracted workspaces
+artifacts/
+output/
+outputs/
+game_content/
+BombRushCyberfunk/
+EvolutionX/
+
+# Temporary Office files
+~$*

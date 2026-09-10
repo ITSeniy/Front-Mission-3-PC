@@ -1,12 +1,12 @@
 # Phase 0 checklist
 
 - [x] Workspace layout + `.gitignore`
-- [x] `psxrecomp/` junction → `psxrecomp-master`
-- [x] `SCPH1001.BIN` in `psxrecomp/bios/` (524288 bytes)
-- [x] RmlUi + FreeType cloned into `psxrecomp/lib/`
+- [x] Reproducible vendored framework under `psxrecomp-master/`
+- [x] `SCPH1001.BIN` in `psxrecomp-master/bios/` (524288 bytes, local only)
+- [x] RmlUi + FreeType pinned as Git submodules
 - [x] MSYS2 MinGW toolchain: cmake, ninja, gcc 15.2, SDL2, ccache
 - [x] Recompiler built: `psxrecomp-bios`, `psxrecomp-game`, `psxrecomp-toml`
-- [x] BIOS C regenerated → `psxrecomp/generated/` (dispatch entries: **4439**)
+- [x] BIOS C regenerated → `psxrecomp-master/generated/` (dispatch entries: **4439**)
 - [x] BIOS-only runtime linked (`psxrecomp___BIOS.exe`, launcher OFF)
 
 ## Notes
@@ -23,8 +23,8 @@
 $env:Path = "C:\msys64\mingw64\bin;C:\msys64\usr\bin;" + $env:Path
 
 # Recompiler
-cmake -S psxrecomp/recompiler -B psxrecomp/recompiler/build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build psxrecomp/recompiler/build -j
+cmake -S psxrecomp-master/recompiler -B psxrecomp-master/recompiler/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build psxrecomp-master/recompiler/build -j
 
 # BIOS
 powershell -File tools/regen_bios.ps1

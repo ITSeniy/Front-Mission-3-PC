@@ -1,0 +1,6 @@
+[submodule "psxrecomp-master/lib/RmlUi"]
+	path = psxrecomp-master/lib/RmlUi
+	url = https://github.com/mikke89/RmlUi.git
+[submodule "psxrecomp-master/lib/freetype"]
+	path = psxrecomp-master/lib/freetype
+	url = https://github.com/freetype/freetype.git

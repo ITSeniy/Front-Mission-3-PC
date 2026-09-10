@@ -1,8 +1,8 @@
 $ErrorActionPreference = 'Stop'
 
-# Windows equivalent of psxrecomp/tools/regen_bios.sh
+# Windows equivalent of psxrecomp-master/tools/regen_bios.sh
 $Root      = Split-Path -Parent $PSScriptRoot
-$Framework = Join-Path $Root 'psxrecomp'
+$Framework = Join-Path $Root 'psxrecomp-master'
 $Build     = Join-Path $Framework 'recompiler/build'
 $Exe       = Join-Path $Build 'psxrecomp-bios.exe'
 $Bios      = Join-Path $Framework 'bios/SCPH1001.BIN'

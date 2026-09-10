@@ -32,7 +32,7 @@ overlay_cache = true
 overlay_backend = "auto"
 # Background recompile of newly captured overlays (needs gcc on PATH).
 # Paths are absolute-ish via project root; adjust if your MSYS install differs.
-overlay_autocompile_cmd = "python psxrecomp/tools/compile_overlays.py --game-toml game.toml --recompiler psxrecomp/recompiler/build/psxrecomp-game.exe --runtime-include psxrecomp/runtime/include --gcc C:/msys64/mingw64/bin/gcc.exe --cps"
+overlay_autocompile_cmd = "python psxrecomp-master/tools/compile_overlays.py --game-toml game.toml --recompiler psxrecomp-master/recompiler/build/psxrecomp-game.exe --runtime-include psxrecomp-master/runtime/include --gcc C:/msys64/mingw64/bin/gcc.exe --cps"
 # Block C enhancements — see docs/BLOCK_C_ENHANCEMENTS.md
 # turbo_loads: wall-clock skip during sustained CD data loads; XA/FMV stay 1x.
 turbo_loads = true

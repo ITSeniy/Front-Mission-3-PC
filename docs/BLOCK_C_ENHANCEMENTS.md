@@ -44,7 +44,7 @@ configured OFF; after the link fix, leave ON.
 - Launcher 16:9 toggle available (EXPERIMENTAL).
 - **Not yet:** `sprite_tag_funcs`, `auto_screen_x`, backdrop sites (need Ghidra + regen).
 
-Framework: `psxrecomp/WIDESCREEN.md`.
+Framework: `psxrecomp-master/WIDESCREEN.md`.
 
 ---
 

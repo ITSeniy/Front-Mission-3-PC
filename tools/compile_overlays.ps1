@@ -13,7 +13,7 @@ if (!(Test-Path $Captures)) {
     throw "No captures at $Captures - play the game first so overlays are recorded."
 }
 
-$Recompiler = Join-Path $Root 'psxrecomp/recompiler/build/psxrecomp-game.exe'
+$Recompiler = Join-Path $Root 'psxrecomp-master/recompiler/build/psxrecomp-game.exe'
 if (!(Test-Path $Recompiler)) {
     throw "Recompiler not built: $Recompiler"
 }
@@ -21,11 +21,11 @@ if (!(Test-Path $Recompiler)) {
 $OutDir = Join-Path $Root 'build/cache'
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
-python (Join-Path $Root 'psxrecomp/tools/compile_overlays.py') `
+python (Join-Path $Root 'psxrecomp-master/tools/compile_overlays.py') `
     --captures $Captures `
     --game-toml (Join-Path $Root 'game.toml') `
     --recompiler $Recompiler `
-    --runtime-include (Join-Path $Root 'psxrecomp/runtime/include') `
+    --runtime-include (Join-Path $Root 'psxrecomp-master/runtime/include') `
     --out-dir $OutDir `
     --gcc 'C:/msys64/mingw64/bin/gcc.exe'
 

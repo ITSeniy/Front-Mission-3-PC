@@ -3,7 +3,7 @@
 Status: **Phase 0 landed** (config + plan). Default presentation remains **4:3**.
 16:9 is opt-in via launcher / `settings.toml` / `[video] aspect_ratio`.
 
-Framework reference: `psxrecomp/WIDESCREEN.md` (squash hack + Tomba hooks).
+Framework reference: `psxrecomp-master/WIDESCREEN.md` (squash hack + Tomba hooks).
 
 ---
 
@@ -115,6 +115,6 @@ Release builds used for FM3 playthrough may lack TCP; use launcher aspect toggle
 
 ## Related
 
-- Framework: `psxrecomp/WIDESCREEN.md`  
-- Block C tracker: `docs/BLOCK_C_ENHANCEMENTS.md`  
-- Tomba reference config: `TombaRecomp-master/game.toml` `[widescreen*]`  
+- Framework: `psxrecomp-master/WIDESCREEN.md`
+- Block C tracker: `docs/BLOCK_C_ENHANCEMENTS.md`
+- Tomba reference config: `TombaRecomp-master/game.toml` `[widescreen*]`

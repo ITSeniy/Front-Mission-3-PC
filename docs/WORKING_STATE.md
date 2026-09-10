@@ -10,11 +10,11 @@ commit should match the playable boot path exercised locally.
 | Game | SLUS-01011, `game.toml`, 3839 JAL seeds, 4542 recompiled funcs |
 | Binary | `Front_Mission_3_Recompiled.exe` via `psx-runtime` |
 | Overlays | `build/cache/SLUS-01011` (~105 native DLLs after play+compile) |
-| Disc/BIOS | Local only: `fm3/fm3.cue`, `psxrecomp/bios/SCPH1001.BIN` |
+| Disc/BIOS | Local only: `fm3/fm3.cue`, `psxrecomp-master/bios/SCPH1001.BIN` |
 
 ## Framework deltas tracked in this repo
 
-Under `psxrecomp-master/runtime/` (hand-edited subset):
+Under the tracked `psxrecomp-master/runtime/` snapshot:
 
 - **GPU/FMV:** depth24 present path, skip flash blank, bulk scanout
 - **MDEC (Block C):** Beetle-faithful dequant/IDCT/YUV; 4/8bpp mono pack;
@@ -28,7 +28,7 @@ Under `psxrecomp-master/runtime/` (hand-edited subset):
 ```powershell
 $env:Path = "C:\msys64\mingw64\bin;" + $env:Path
 cd build
-.\Front_Mission_3_Recompiled.exe --game ..\game.toml --disc ..\fm3\fm3.cue --bios ..\psxrecomp\bios\SCPH1001.BIN
+.\Front_Mission_3_Recompiled.exe --game ..\game.toml --disc ..\fm3\fm3.cue --bios ..\psxrecomp-master\bios\SCPH1001.BIN
 ```
 
 ## Playthrough A checklist

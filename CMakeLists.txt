@@ -4,7 +4,7 @@ project(FrontMission3Recomp C CXX)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_CXX_STANDARD 17)
 
-set(PSXRECOMP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/psxrecomp" CACHE PATH
+set(PSXRECOMP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/psxrecomp-master" CACHE PATH
     "Path to psxrecomp")
 
 include("${PSXRECOMP_ROOT}/runtime/runtime.cmake")
